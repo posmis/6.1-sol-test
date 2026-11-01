@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import platform
 import time
+from dataclasses import asdict
 import numpy as np
 import scipy
 from .solver import Config, Solver
@@ -11,8 +12,8 @@ from .solver import Config, Solver
 
 def channel_check(result):
     c = result.config
-    if c.scenario != "channel":
-        raise ValueError("Dean comparison applies only to the straight channel")
+    if c.scenario != "channel" or c.top != "wall" or c.bottom != "wall":
+        raise ValueError("Dean comparison applies only to the straight channel with two walls")
     # Same physical stations (nearest cell centres) on every mesh, beyond 9H.
     a, b = round(.65*c.nx-.5), round(.9*c.nx-.5)
     spacing = (b-a)*c.length/c.nx
@@ -33,6 +34,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", default="results/validation.json")
     parser.add_argument("--save-frames", action="store_true")
+    parser.add_argument("--extended", action="store_true", help="Also run new geometries and large-grid single-step checks")
     args = parser.parse_args()
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -56,6 +58,22 @@ def main():
                           pressure_accuracy="Not validated against experimental data")
     if args.save_frames:
         result.save(output.parent/"step.npz")
+    if args.extended:
+        report["additional_scenarios"] = []
+        report["large_grid_single_step"] = []
+        configs = [Config(scenario=name) for name in ("contraction", "expansion", "cylinder", "baffles")]
+        large = [Config(nx=1024, ny=1024, duration=1e-6, frames=2)]
+        large += [Config(scenario=name, nx=1024, ny=256, duration=1e-6, frames=2)
+                  for name in ("step", "contraction", "expansion", "cylinder", "baffles")]
+        for c in configs+large:
+            start = time.perf_counter()
+            result = Solver(c).run()
+            row = dict(config=asdict(c), seconds=time.perf_counter()-start,
+                       diagnostics=result.diagnostics,
+                       scope="Numerical smoke check only; pressure accuracy not validated")
+            key = "large_grid_single_step" if c.frames == 2 else "additional_scenarios"
+            report[key].append(row)
+            print(f"{c.scenario} {c.nx}x{c.ny}: {row['seconds']:.2f}s ({c.duration:g}s simulated)", flush=True)
     output.write_text(json.dumps(report, indent=2)+"\n")
     print(f"Saved {output}", flush=True)
     return 0 if all(row["pressure_check"]["within_10_percent"] for row in report["channel"]) else 1

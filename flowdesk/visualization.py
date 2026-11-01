@@ -20,7 +20,8 @@ def streamlines(u, v, fluid, length, height, count=16, max_steps=None):
         speed = np.linalg.norm(vel, axis=1)
         return vel/np.maximum(speed[:, None], 1e-12), speed
 
-    ds = .45*min(dx, dy)
+    # Drawing accuracy is independent of mesh size. Bound integration cost on 1024².
+    ds = max(.45*min(dx, dy), length/1800)
     if max_steps is None:
         max_steps = min(4000, int(2*length/ds)+1)
     for _ in range(max_steps):

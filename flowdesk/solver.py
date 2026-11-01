@@ -7,8 +7,8 @@ Smooth equilibrium wall functions model wall stress.
 from dataclasses import dataclass, asdict
 import json
 import numpy as np
-from scipy.sparse import coo_matrix
-from scipy.sparse.linalg import factorized
+from .scenarios import SCENARIOS, geometry
+from .pressure import PressureSolver
 
 
 @dataclass(frozen=True)
@@ -24,12 +24,22 @@ class Config:
     duration: float = 1.2
     frames: int = 80
     intensity: float = 0.05
+    top: str = "wall"
+    bottom: str = "wall"
+
+    @property
+    def frame_count(self):
+        # At most 256 MiB of stored float32 fields, independent of requested mesh.
+        return min(self.frames, max(2, (256*1024**2)//(self.nx*self.ny*5*4)))
 
     def validate(self):
-        if self.scenario not in ("channel", "step"):
+        if self.scenario not in SCENARIOS:
             raise ValueError("Unknown scenario")
-        if not (16 <= self.nx <= 384 and 8 <= self.ny <= 128):
-            raise ValueError("Grid must be 16..384 × 8..128")
+        if not (isinstance(self.nx, int) and isinstance(self.ny, int)
+                and 16 <= self.nx <= 1024 and 8 <= self.ny <= 1024):
+            raise ValueError("Grid must be 16..1024 × 8..1024")
+        if self.top not in ("wall", "open") or self.bottom not in ("wall", "open"):
+            raise ValueError("Top and bottom boundaries must be wall or open")
         for name in ("length", "height", "speed", "rho", "nu", "duration"):
             if not np.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be finite and positive")
@@ -63,7 +73,7 @@ class Result:
             arrays = {key: z[key].copy() for key in
                       ("time", "u", "v", "pressure", "k", "epsilon", "fluid")}
             shape = (len(arrays["time"]), cfg.ny, cfg.nx)
-            if (shape[0] != cfg.frames or arrays["time"].ndim != 1
+            if (shape[0] not in (cfg.frame_count, cfg.frames) or arrays["time"].ndim != 1
                 or not np.isfinite(arrays["time"]).all()
                 or not np.all(np.diff(arrays["time"]) > 0)
                 or arrays["fluid"].dtype != bool
@@ -103,15 +113,17 @@ class Solver:
         config.validate()
         self.c = c = config
         self.dx, self.dy = c.length/c.nx, c.height/c.ny
-        self.fluid = np.ones((c.ny, c.nx), dtype=bool)
-        if c.scenario == "step":
-            self.fluid[:c.ny//2, :c.nx//5] = False
+        self.fluid = geometry(c)
         f = self.fluid
         self.um = np.zeros((c.ny, c.nx+1), bool)
         self.vm = np.zeros((c.ny+1, c.nx), bool)
         self.um[:, 1:-1] = f[:, :-1] & f[:, 1:]
         self.um[:, 0], self.um[:, -1] = f[:, 0], f[:, -1]
         self.vm[1:-1] = f[:-1] & f[1:]
+        if c.bottom == "open":
+            self.vm[0] = f[0]
+        if c.top == "open":
+            self.vm[-1] = f[-1]
         self.u = self.um.astype(float)*c.speed
         self.v = np.zeros_like(self.vm, float)
         self.p = np.zeros_like(f, float)
@@ -124,7 +136,8 @@ class Solver:
             neighbour = np.roll(f, -sign, axis=axis)
             edge = [slice(None), slice(None)]
             edge[axis] = -1 if sign == 1 else 0
-            neighbour[tuple(edge)] = axis == 1  # open x boundaries
+            neighbour[tuple(edge)] = (axis == 1 or
+                (c.bottom if sign == -1 else c.top) == "open")
             self.walls.append((axis, spacing, f & ~neighbour))
         self.wall = np.logical_or.reduce([w[2] for w in self.walls])
         self._pressure_matrix()
@@ -132,23 +145,7 @@ class Solver:
         self.p.fill(0)
 
     def _pressure_matrix(self):
-        f = self.fluid
-        ids = np.full(f.shape, -1, int)
-        ids[f] = np.arange(f.sum())
-        rows, cols, values = [], [], []
-        diag = np.zeros(f.sum())
-        for axis, h in ((0, self.dy), (1, self.dx)):
-            a, b = [slice(None)]*2, [slice(None)]*2
-            a[axis], b[axis] = slice(None, -1), slice(1, None)
-            a, b = tuple(a), tuple(b)
-            ok = f[a] & f[b]
-            i, j = ids[a][ok], ids[b][ok]
-            for r, col in ((i, j), (j, i)):
-                rows.extend(r); cols.extend(col); values.extend(np.full(len(r), -1/h**2))
-                np.add.at(diag, r, 1/h**2)
-        diag[ids[:, -1][f[:, -1]]] += 2/self.dx**2
-        rows.extend(np.arange(len(diag))); cols.extend(np.arange(len(diag))); values.extend(diag)
-        self.solve_p = factorized(coo_matrix((values, (rows, cols)), shape=(len(diag),)*2).tocsc())
+        self.solve_p = PressureSolver(self.fluid, self.dx, self.dy, self.c.bottom, self.c.top)
 
     def centres(self):
         return (self.u[:, :-1]+self.u[:, 1:])*0.5, (self.v[:-1]+self.v[1:])*0.5
@@ -161,6 +158,10 @@ class Solver:
         self.u[:, 1:-1] -= dt*np.diff(self.p, axis=1)/self.dx*self.um[:, 1:-1]
         self.u[:, -1] += dt*2*self.p[:, -1]/self.dx
         self.v[1:-1] -= dt*np.diff(self.p, axis=0)/self.dy*self.vm[1:-1]
+        if self.c.bottom == "open":
+            self.v[0] -= dt*2*self.p[0]/self.dy*self.vm[0]
+        if self.c.top == "open":
+            self.v[-1] += dt*2*self.p[-1]/self.dy*self.vm[-1]
         self.u *= self.um
         self.v *= self.vm
 
@@ -169,7 +170,9 @@ class Solver:
         kw, ew, prod = np.zeros_like(uc), np.zeros_like(uc), np.zeros_like(uc)
         count = np.zeros_like(uc)
         for axis, h, mask in self.walls:
-            tangent = uc if axis == 0 else vc
+            if not mask.any():
+                continue
+            tangent = (uc if axis == 0 else vc)[mask]
             speed = np.abs(tangent)
             y = h*0.5
             # Solve smooth log law U/u_tau = log(E*y*u_tau/nu)/kappa.
@@ -179,15 +182,15 @@ class Solver:
                 residual = ut*log/0.41-speed
                 ut = np.maximum(ut-residual/((log+1)/0.41), 1e-9)
             ut = np.where(y*ut/self.c.nu > 11.06, ut, np.sqrt(self.c.nu*speed/y))
-            force = -np.sign(tangent)*ut**2/h*mask
+            force = -np.sign(tangent)*ut**2/h
             if axis == 0:
-                fx += force
+                fx[mask] += force
             else:
-                fy += force
-            kw += ut**2/0.3*mask
-            ew += ut**3/(0.41*y)*mask
-            prod += ut**3/(0.41*y)*mask
-            count += mask
+                fy[mask] += force
+            kw[mask] += ut**2/0.3
+            ew[mask] += ut**3/(0.41*y)
+            prod[mask] += ut**3/(0.41*y)
+            count[mask] += 1
         return fx, fy, kw/np.maximum(count, 1), ew/np.maximum(count, 1), prod
 
     def step(self, remaining):
@@ -217,6 +220,10 @@ class Solver:
                           +diffusion(self.v, nuv, self.vm, dx, dy)+fvy)
         newu[:, 0] = c.speed*self.um[:, 0]
         newu[:, -1] = newu[:, -2]
+        if c.bottom == "open":
+            newv[0] = newv[1]
+        if c.top == "open":
+            newv[-1] = newv[-2]
         self.u, self.v = newu*self.um, newv*self.vm
         self.project(dt)
         production = np.minimum(nut*(2*dux**2+2*dvy**2+(duy+dvx)**2), 10*self.e)
@@ -226,6 +233,12 @@ class Solver:
             xq = np.pad(q, ((0, 0), (1, 1)), mode="edge")
             xq[:, 0] = inlet
             yq = np.pad(q, ((1, 1), (0, 0)), mode="edge")
+            # Ambient turbulence on inflow through pressure-open sides/outlet.
+            xq[:, -1] = np.where(self.u[:, -1] < 0, inlet, xq[:, -1])
+            if c.bottom == "open":
+                yq[0] = np.where(self.v[0] > 0, inlet, yq[0])
+            if c.top == "open":
+                yq[-1] = np.where(self.v[-1] < 0, inlet, yq[-1])
             qx = self.u*np.where(self.u >= 0, xq[:, :-1], xq[:, 1:])
             qy = self.v*np.where(self.v >= 0, yq[:-1], yq[1:])
             return -np.diff(qx, axis=1)/dx-np.diff(qy, axis=0)/dy
@@ -245,8 +258,9 @@ class Solver:
         return dt
 
     def run(self, progress=None, cancel=None):
-        times = np.linspace(0, self.c.duration, self.c.frames)
-        fields = [[] for _ in range(5)]
+        self.solve_p.cancel = cancel
+        times = np.linspace(0, self.c.duration, self.c.frame_count)
+        fields = [np.empty((len(times), self.c.ny, self.c.nx), np.float32) for _ in range(5)]
         t, steps, maxdiv = 0., 0, 0.
         last, change = None, 1.
         for frame, target in enumerate(times):
@@ -261,18 +275,21 @@ class Solver:
                 change = float(np.linalg.norm((uc-last)[self.fluid]) /
                                max(np.linalg.norm(uc[self.fluid]), 1e-12))
             last = uc.copy()
-            static = (self.p-2*self.k/3+2*np.mean(self.k[:, -1])/3)*self.c.rho
+            static = (self.p-2*self.k/3+2*np.mean(self.k[:, -1][self.fluid[:, -1]])/3)*self.c.rho
             for dest, q in zip(fields, (uc, vc, static, self.k, self.e)):
-                dest.append(np.where(self.fluid, q, 0).astype(np.float32))
+                dest[frame] = np.where(self.fluid, q, 0)
             if progress:
                 progress(frame+1, len(times), t)
         inflow = float(self.u[:, 0].sum()*self.dy)
         outflow = float(self.u[:, -1].sum()*self.dy)
+        sideflow = float((self.v[-1].sum()-self.v[0].sum())*self.dx)
         diagnostics = dict(steps=steps, max_divergence=maxdiv,
-            mass_imbalance=abs(outflow-inflow)/max(inflow, 1e-12),
+            mass_imbalance=abs(outflow+sideflow-inflow)/max(inflow, 1e-12),
+            side_flow_m2_s=sideflow, stored_frames=len(times), pressure_solver=self.solve_p.method,
             final_frame_velocity_change=change,
             reynolds=self.c.speed*self.c.height/self.c.nu,
-            pressure_drop_pa=float(np.mean(static[:, 0][self.fluid[:, 0]])-np.mean(static[:, -1])),
+            pressure_drop_pa=float(np.mean(static[:, 0][self.fluid[:, 0]])
+                                   -np.mean(static[:, -1][self.fluid[:, -1]])),
             backflow=bool(np.any(self.u[:, -1] < 0)),
             note="Finite-time RANS result; small divergence alone does not establish steady convergence.")
-        return Result(self.c, times, *[np.array(q) for q in fields], self.fluid.copy(), diagnostics)
+        return Result(self.c, times, *fields, self.fluid.copy(), diagnostics)

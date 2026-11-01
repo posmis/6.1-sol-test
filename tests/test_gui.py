@@ -15,7 +15,14 @@ def test_desktop_calculate_play_save_load(tmp_path):
     _app = app
     window = Window()
     window.show()
+    assert window.scenario.count() == 6
+    window.grid.setCurrentIndex(6)
+    assert window.nx.value() == window.ny.value() == 1024
+    assert "12 кадров" in window.memory.text()
     window.grid.setCurrentIndex(0)
+    window.nx.setValue(80)
+    window.ny.setValue(20)
+    window.top.setCurrentIndex(1)
     window.duration.setValue(.2)
     window.scenario.setCurrentIndex(1)
     window.start()
@@ -27,6 +34,8 @@ def test_desktop_calculate_play_save_load(tmp_path):
         assert window.result is not None, window.info.text()
         assert window.process is None
         assert window.result.config.scenario == "step"
+        assert (window.result.config.nx, window.result.config.ny) == (80, 20)
+        assert window.result.config.top == "open"
         rect = window.image.boundingRect()
         mapped = window.image.mapRectToParent(rect)
         assert np.isclose(mapped.width(), .6)
@@ -43,6 +52,8 @@ def test_desktop_calculate_play_save_load(tmp_path):
         window.result.save(path)
         from flowdesk.solver import Result
         window.accept_result(Result.load(path))
+        assert window.top.currentIndex() == 1
+        assert window.nx.value() == 80
         window.show_lines.setChecked(False)
         app.processEvents()
         assert not window.line.isVisible()

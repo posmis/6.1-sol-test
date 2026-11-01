@@ -10,6 +10,10 @@ from PySide6 import QtCore, QtWidgets
 import pyqtgraph as pg
 from .solver import Config, Result, Solver
 from .visualization import streamlines
+from .scenarios import SCENARIOS
+
+GRID_PRESETS = [(64, 16), (96, 24), (144, 36), (256, 64), (512, 128),
+                (1024, 256), (1024, 1024)]
 
 
 def calculate(config, messages, cancel):
@@ -50,21 +54,46 @@ class Window(QtWidgets.QMainWindow):
         left.addWidget(title)
         left.addWidget(QtWidgets.QLabel("Лаборатория течений · вода · 2D"))
         self.scenario = QtWidgets.QComboBox()
-        self.scenario.addItems(["Прямой канал", "Обратная ступенька"])
+        self.scenario.addItems(list(SCENARIOS.values()))
         self.grid = QtWidgets.QComboBox()
-        self.grid.addItems(["Быстрая · 64 × 16", "Стандартная · 96 × 24", "Точная · 144 × 36"])
+        self.grid.addItems([f"{nx} × {ny}" for nx, ny in GRID_PRESETS]+["Своя сетка"])
         self.grid.setCurrentIndex(1)
+        self.nx = QtWidgets.QSpinBox()
+        self.nx.setRange(16, 1024)
+        self.nx.setValue(96)
+        self.ny = QtWidgets.QSpinBox()
+        self.ny.setRange(8, 1024)
+        self.ny.setValue(24)
+        self.frames = QtWidgets.QSpinBox()
+        self.frames.setRange(2, 500)
+        self.frames.setValue(80)
+        self.top, self.bottom = QtWidgets.QComboBox(), QtWidgets.QComboBox()
+        for boundary in (self.top, self.bottom):
+            boundary.addItems(["Стенка", "Открытая (не стенка)"])
+            boundary.setToolTip("Открытая: механическое давление 0; жидкость может входить и выходить. Не свободная поверхность.")
         self.speed = self.number(.1, 5, 1, " м/с")
         self.duration = self.number(.2, 10, 1.2, " с")
         self.length = self.number(.1, 3, .6, " м")
         self.height = self.number(.01, .2, .04, " м", 3)
         form = QtWidgets.QFormLayout()
         for label, widget in (("Сценарий", self.scenario), ("Сетка", self.grid),
+                              ("Ячеек по X", self.nx), ("Ячеек по Y", self.ny),
+                              ("Верхняя граница", self.top), ("Нижняя граница", self.bottom),
+                              ("Кадров", self.frames),
                               ("Скорость входа", self.speed), ("Время расчёта", self.duration),
-                              ("Длина", self.length), ("Высота выхода", self.height)):
+                              ("Длина", self.length), ("Высота области", self.height)):
             form.addRow(label, widget)
         left.addLayout(form)
-        self.settings = [self.scenario, self.grid, self.speed, self.duration, self.length, self.height]
+        self.memory = QtWidgets.QLabel()
+        self.memory.setWordWrap(True)
+        left.addWidget(self.memory)
+        self.grid.currentIndexChanged.connect(self.preset_changed)
+        self.nx.valueChanged.connect(self.mesh_changed)
+        self.ny.valueChanged.connect(self.mesh_changed)
+        self.frames.valueChanged.connect(self.update_memory)
+        self.update_memory()
+        self.settings = [self.scenario, self.grid, self.nx, self.ny, self.top, self.bottom,
+                         self.frames, self.speed, self.duration, self.length, self.height]
         self.run_button = QtWidgets.QPushButton("Рассчитать кадры")
         self.run_button.clicked.connect(self.start)
         self.cancel_button = QtWidgets.QPushButton("Отменить расчёт")
@@ -77,7 +106,7 @@ class Window(QtWidgets.QMainWindow):
         self.info = QtWidgets.QLabel("Выберите сценарий и выполните расчёт.\n\nРазмеры и поля — в системе СИ.")
         self.info.setWordWrap(True)
         left.addWidget(self.info)
-        note = QtWidgets.QLabel("Модель: несжимаемые RANS + k–ε.\nГладкие стенки, пристеночные функции.\n\nЦель ±10% относится к проверяемому перепаду давления. Для ступеньки точность пока не подтверждена.")
+        note = QtWidgets.QLabel("Модель: несжимаемые RANS + k–ε.\nЦель ±10% проверена только для стандартного канала со стенками. Новые геометрии и открытые границы требуют отдельного эталона.")
         note.setWordWrap(True)
         note.setStyleSheet("color: #9aaec3; font-size: 12px")
         left.addWidget(note)
@@ -88,7 +117,12 @@ class Window(QtWidgets.QMainWindow):
         load.clicked.connect(self.load)
         left.addWidget(save)
         left.addWidget(load)
-        layout.addWidget(sidebar)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(sidebar)
+        scroll.setMaximumWidth(340)
+        scroll.setMinimumWidth(320)
+        layout.addWidget(scroll)
         right = QtWidgets.QVBoxLayout()
         toolbar = QtWidgets.QHBoxLayout()
         self.field = QtWidgets.QComboBox()
@@ -125,6 +159,9 @@ class Window(QtWidgets.QMainWindow):
         self.plot.addItem(self.line)
         self.particles = pg.ScatterPlotItem(size=4, pen=None, brush="#f8fafc")
         self.plot.addItem(self.particles)
+        self.boundaries = [pg.PlotCurveItem(), pg.PlotCurveItem()]
+        for line in self.boundaries:
+            self.plot.addItem(line)
         right.addWidget(self.graphics, 1)
         controls = QtWidgets.QHBoxLayout()
         self.play = QtWidgets.QPushButton("▶ Воспроизвести")
@@ -167,8 +204,10 @@ class Window(QtWidgets.QMainWindow):
     def start(self):
         if self.process is not None:
             return
-        nx, ny = [(64, 16), (96, 24), (144, 36)][self.grid.currentIndex()]
-        c = Config(scenario=["channel", "step"][self.scenario.currentIndex()], nx=nx, ny=ny,
+        c = Config(scenario=list(SCENARIOS)[self.scenario.currentIndex()],
+                   nx=self.nx.value(), ny=self.ny.value(), frames=self.frames.value(),
+                   top=["wall", "open"][self.top.currentIndex()],
+                   bottom=["wall", "open"][self.bottom.currentIndex()],
                    speed=self.speed.value(), duration=self.duration.value(),
                    length=self.length.value(), height=self.height.value())
         self.playing = False
@@ -182,6 +221,30 @@ class Window(QtWidgets.QMainWindow):
         self.cancel_button.setEnabled(True)
         self.progress.setValue(0)
         self.info.setText("Расчёт RANS / k–ε…\nИнтерфейс остаётся доступен.")
+
+    def set_mesh(self, nx, ny):
+        for control, value in ((self.nx, nx), (self.ny, ny)):
+            control.blockSignals(True)
+            control.setValue(value)
+            control.blockSignals(False)
+        self.grid.blockSignals(True)
+        self.grid.setCurrentIndex(GRID_PRESETS.index((nx, ny)) if (nx, ny) in GRID_PRESETS else len(GRID_PRESETS))
+        self.grid.blockSignals(False)
+        self.update_memory()
+
+    def preset_changed(self, index):
+        if index < len(GRID_PRESETS):
+            self.set_mesh(*GRID_PRESETS[index])
+
+    def mesh_changed(self, *_):
+        self.set_mesh(self.nx.value(), self.ny.value())
+
+    def update_memory(self, *_):
+        c = Config(nx=self.nx.value(), ny=self.ny.value(), frames=self.frames.value())
+        mib = c.nx*c.ny*c.frame_count*5*4/1024**2
+        self.memory.setText(f"Сохранится {c.frame_count} кадров · поля {mib:.1f} МиБ."
+            + ("\nКадры сокращены до бюджета 256 МиБ." if c.frame_count < c.frames else "")
+            + ("\nКрупная сетка: расчёт существенно дольше; мелкая сетка у стенки не гарантирует точность k–ε." if c.nx*c.ny > 65536 else ""))
 
     def finish_worker(self):
         self.process.join(timeout=.1)
@@ -246,15 +309,24 @@ class Window(QtWidgets.QMainWindow):
             + ("Обратный поток на выходе: увеличьте длину канала.\n" if d['backflow'] else "")
             + "Сходимость и точность см. в отчёте проверки.")
         c = result.config
-        self.scenario.setCurrentIndex(0 if c.scenario == "channel" else 1)
+        self.scenario.setCurrentIndex(list(SCENARIOS).index(c.scenario))
+        self.top.setCurrentIndex(0 if c.top == "wall" else 1)
+        self.bottom.setCurrentIndex(0 if c.bottom == "wall" else 1)
+        self.frames.setValue(c.frames)
         for control, value in ((self.speed, c.speed), (self.duration, c.duration),
                                (self.length, c.length), (self.height, c.height)):
             control.setValue(value)
-        sizes = [(64, 16), (96, 24), (144, 36)]
-        if (c.nx, c.ny) in sizes:
-            self.grid.setCurrentIndex(sizes.index((c.nx, c.ny)))
+        self.set_mesh(c.nx, c.ny)
         self.image.setImage(np.zeros((c.ny, c.nx)), autoLevels=False)
         self.image.setRect(QtCore.QRectF(0, 0, c.length, c.height))
+        for line, boundary, row, y in zip(self.boundaries, (c.bottom, c.top),
+                                         (result.fluid[0], result.fluid[-1]), (0, c.height)):
+            # Leave geometric solids intact even when an outer edge is open.
+            x = (np.arange(c.nx)+.5)*c.length/c.nx
+            line.setData(np.where(row, x, np.nan), np.full(c.nx, y), connect="finite")
+            line.setPen(pg.mkPen("#60d5ed" if boundary == "open" else "#fbbf24", width=2,
+                style=QtCore.Qt.PenStyle.DashLine if boundary == "open" else QtCore.Qt.PenStyle.SolidLine))
+        self.caption.setToolTip("Жёлтая граница — стенка. Голубая пунктирная — открытая граница давления.")
         self.plot.setRange(xRange=(0, c.length), yRange=(0, c.height), padding=.05)
         self.change_field()
         self.progress.setValue(100)
@@ -299,8 +371,8 @@ class Window(QtWidgets.QMainWindow):
                 self.stream_future = (id(r), key, self.stream_pool.submit(
                     streamlines, u.copy(), v.copy(), r.fluid, r.config.length, r.config.height))
             # Markers illustrate flow direction; they are not physical tracers.
-            dots = [p[int((t*.35*r.config.speed/(.45*min(r.config.length/r.config.nx,
-                        r.config.height/r.config.ny))+i*31) % len(p))] for i, p in enumerate(self.paths)]
+            ds = max(.45*min(r.config.length/r.config.nx, r.config.height/r.config.ny), r.config.length/1800)
+            dots = [p[int((t*.35*r.config.speed/ds+i*31) % len(p))] for i, p in enumerate(self.paths)]
             if dots:
                 dots = np.array(dots)
                 self.particles.setData(dots[:, 0], dots[:, 1])

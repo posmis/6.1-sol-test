@@ -1,0 +1,445 @@
+{
+  "python": "3.12.14",
+  "numpy": "2.5.4",
+  "scipy": "1.18.1",
+  "channel": [
+    {
+      "grid": [
+        64,
+        16
+      ],
+      "seconds": 0.5274422340003184,
+      "diagnostics": {
+        "steps": 442,
+        "max_divergence": 7.945868718535814e-14,
+        "mass_imbalance": 0.0,
+        "side_flow_m2_s": 0.0,
+        "stored_frames": 80,
+        "pressure_solver": "spectral",
+        "final_frame_velocity_change": 1.4058961551651794e-12,
+        "reynolds": 39840.6374501992,
+        "pressure_drop_pa": 92.82219323626394,
+        "backflow": false,
+        "note": "Finite-time RANS result; small divergence alone does not establish steady convergence."
+      },
+      "pressure_check": {
+        "stations_m": [
+          0.3890625,
+          0.5390625
+        ],
+        "pressure_drop_pa": 20.971900939941406,
+        "reference_pa": 19.34149873792123,
+        "relative_error": 0.0842955462817152,
+        "within_10_percent": true,
+        "comparison": "Dean smooth fully-developed plane-channel correlation, Cf=0.073 Re_H^-0.25",
+        "scope": "Selected downstream stations only; excludes entrance losses. Not experimental validation."
+      }
+    },
+    {
+      "grid": [
+        96,
+        24
+      ],
+      "seconds": 1.0024504969996997,
+      "diagnostics": {
+        "steps": 632,
+        "max_divergence": 1.3308798507694064e-13,
+        "mass_imbalance": 0.0,
+        "side_flow_m2_s": 0.0,
+        "stored_frames": 80,
+        "pressure_solver": "spectral",
+        "final_frame_velocity_change": 1.430072914519055e-12,
+        "reynolds": 39840.6374501992,
+        "pressure_drop_pa": 94.3228094272742,
+        "backflow": false,
+        "note": "Finite-time RANS result; small divergence alone does not establish steady convergence."
+      },
+      "pressure_check": {
+        "stations_m": [
+          0.390625,
+          0.540625
+        ],
+        "pressure_drop_pa": 20.282865524291992,
+        "reference_pa": 19.34149873792123,
+        "relative_error": 0.04867082944948331,
+        "within_10_percent": true,
+        "comparison": "Dean smooth fully-developed plane-channel correlation, Cf=0.073 Re_H^-0.25",
+        "scope": "Selected downstream stations only; excludes entrance losses. Not experimental validation."
+      }
+    },
+    {
+      "grid": [
+        144,
+        36
+      ],
+      "seconds": 2.4037109390001206,
+      "diagnostics": {
+        "steps": 931,
+        "max_divergence": 2.251948627574052e-13,
+        "mass_imbalance": 0.0,
+        "side_flow_m2_s": 0.0,
+        "stored_frames": 80,
+        "pressure_solver": "spectral",
+        "final_frame_velocity_change": 1.3245202420834833e-12,
+        "reynolds": 39840.6374501992,
+        "pressure_drop_pa": 95.03895799463419,
+        "backflow": false,
+        "note": "Finite-time RANS result; small divergence alone does not establish steady convergence."
+      },
+      "pressure_check": {
+        "stations_m": [
+          0.38958333333333334,
+          0.5395833333333333
+        ],
+        "pressure_drop_pa": 20.12346839904785,
+        "reference_pa": 19.34149873792123,
+        "relative_error": 0.0404296312153658,
+        "within_10_percent": true,
+        "comparison": "Dean smooth fully-developed plane-channel correlation, Cf=0.073 Re_H^-0.25",
+        "scope": "Selected downstream stations only; excludes entrance losses. Not experimental validation."
+      }
+    }
+  ],
+  "step": {
+    "seconds": 2.1516984980003144,
+    "diagnostics": {
+      "steps": 1010,
+      "max_divergence": 1.5543122344752192e-13,
+      "mass_imbalance": 1.734723475976807e-16,
+      "side_flow_m2_s": 0.0,
+      "stored_frames": 80,
+      "pressure_solver": "sparse-lu",
+      "final_frame_velocity_change": 0.0032610970999828225,
+      "reynolds": 39840.6374501992,
+      "pressure_drop_pa": -161.95611343015042,
+      "backflow": false,
+      "note": "Finite-time RANS result; small divergence alone does not establish steady convergence."
+    },
+    "minimum_u": -0.2357502281665802,
+    "pressure_accuracy": "Not validated against experimental data"
+  },
+  "additional_scenarios": [
+    {
+      "config": {
+        "scenario": "contraction",
+        "nx": 96,
+        "ny": 24,
+        "length": 0.6,
+        "height": 0.04,
+        "speed": 1.0,
+        "rho": 998.2,
+        "nu": 1.004e-06,
+        "duration": 1.2,
+        "frames": 80,
+        "intensity": 0.05,
+        "top": "wall",
+        "bottom": "wall"
+      },
+      "seconds": 5.576044810999974,
+      "diagnostics": {
+        "steps": 3338,
+        "max_divergence": 7.701617121824711e-13,
+        "mass_imbalance": 8.673617379884035e-16,
+        "side_flow_m2_s": 0.0,
+        "stored_frames": 80,
+        "pressure_solver": "sparse-lu",
+        "final_frame_velocity_change": 1.8183027928093646e-16,
+        "reynolds": 39840.6374501992,
+        "pressure_drop_pa": 2952.3177394704016,
+        "backflow": false,
+        "note": "Finite-time RANS result; small divergence alone does not establish steady convergence."
+      },
+      "scope": "Numerical smoke check only; pressure accuracy not validated"
+    },
+    {
+      "config": {
+        "scenario": "expansion",
+        "nx": 96,
+        "ny": 24,
+        "length": 0.6,
+        "height": 0.04,
+        "speed": 1.0,
+        "rho": 998.2,
+        "nu": 1.004e-06,
+        "duration": 1.2,
+        "frames": 80,
+        "intensity": 0.05,
+        "top": "wall",
+        "bottom": "wall"
+      },
+      "seconds": 1.2909125799997128,
+      "diagnostics": {
+        "steps": 744,
+        "max_divergence": 1.9979851106910473e-13,
+        "mass_imbalance": 5.204170427930421e-16,
+        "side_flow_m2_s": 0.0,
+        "stored_frames": 80,
+        "pressure_solver": "sparse-lu",
+        "final_frame_velocity_change": 1.947189805518596e-05,
+        "reynolds": 39840.6374501992,
+        "pressure_drop_pa": -156.99498142275561,
+        "backflow": false,
+        "note": "Finite-time RANS result; small divergence alone does not establish steady convergence."
+      },
+      "scope": "Numerical smoke check only; pressure accuracy not validated"
+    },
+    {
+      "config": {
+        "scenario": "cylinder",
+        "nx": 96,
+        "ny": 24,
+        "length": 0.6,
+        "height": 0.04,
+        "speed": 1.0,
+        "rho": 998.2,
+        "nu": 1.004e-06,
+        "duration": 1.2,
+        "frames": 80,
+        "intensity": 0.05,
+        "top": "wall",
+        "bottom": "wall"
+      },
+      "seconds": 4.588472892000027,
+      "diagnostics": {
+        "steps": 2516,
+        "max_divergence": 3.086420008457935e-13,
+        "mass_imbalance": 0.0,
+        "side_flow_m2_s": 0.0,
+        "stored_frames": 80,
+        "pressure_solver": "sparse-lu",
+        "final_frame_velocity_change": 1.6733587316693322e-12,
+        "reynolds": 39840.6374501992,
+        "pressure_drop_pa": 852.1999982561217,
+        "backflow": false,
+        "note": "Finite-time RANS result; small divergence alone does not establish steady convergence."
+      },
+      "scope": "Numerical smoke check only; pressure accuracy not validated"
+    },
+    {
+      "config": {
+        "scenario": "baffles",
+        "nx": 96,
+        "ny": 24,
+        "length": 0.6,
+        "height": 0.04,
+        "speed": 1.0,
+        "rho": 998.2,
+        "nu": 1.004e-06,
+        "duration": 1.2,
+        "frames": 80,
+        "intensity": 0.05,
+        "top": "wall",
+        "bottom": "wall"
+      },
+      "seconds": 19.654283331999977,
+      "diagnostics": {
+        "steps": 8037,
+        "max_divergence": 1.3488446470866222e-12,
+        "mass_imbalance": 1.3877787807814457e-15,
+        "side_flow_m2_s": 0.0,
+        "stored_frames": 80,
+        "pressure_solver": "sparse-lu",
+        "final_frame_velocity_change": 3.931960539409048e-08,
+        "reynolds": 39840.6374501992,
+        "pressure_drop_pa": 14851.480053177904,
+        "backflow": false,
+        "note": "Finite-time RANS result; small divergence alone does not establish steady convergence."
+      },
+      "scope": "Numerical smoke check only; pressure accuracy not validated"
+    }
+  ],
+  "large_grid_single_step": [
+    {
+      "config": {
+        "scenario": "channel",
+        "nx": 1024,
+        "ny": 1024,
+        "length": 0.6,
+        "height": 0.04,
+        "speed": 1.0,
+        "rho": 998.2,
+        "nu": 1.004e-06,
+        "duration": 1e-06,
+        "frames": 2,
+        "intensity": 0.05,
+        "top": "wall",
+        "bottom": "wall"
+      },
+      "seconds": 0.5455074980000063,
+      "diagnostics": {
+        "steps": 1,
+        "max_divergence": 1.6946917942790607e-12,
+        "mass_imbalance": 1.734723475976807e-16,
+        "side_flow_m2_s": 0.0,
+        "stored_frames": 2,
+        "pressure_solver": "spectral",
+        "final_frame_velocity_change": 5.807377740494035e-05,
+        "reynolds": 39840.6374501992,
+        "pressure_drop_pa": 1537.8648516000258,
+        "backflow": false,
+        "note": "Finite-time RANS result; small divergence alone does not establish steady convergence."
+      },
+      "scope": "Numerical smoke check only; pressure accuracy not validated"
+    },
+    {
+      "config": {
+        "scenario": "step",
+        "nx": 1024,
+        "ny": 256,
+        "length": 0.6,
+        "height": 0.04,
+        "speed": 1.0,
+        "rho": 998.2,
+        "nu": 1.004e-06,
+        "duration": 1e-06,
+        "frames": 2,
+        "intensity": 0.05,
+        "top": "wall",
+        "bottom": "wall"
+      },
+      "seconds": 0.33279298400020707,
+      "diagnostics": {
+        "steps": 1,
+        "max_divergence": 2.838191903720144e-09,
+        "mass_imbalance": 1.0408340855860843e-15,
+        "side_flow_m2_s": 0.0,
+        "stored_frames": 2,
+        "pressure_solver": "cg-spectral",
+        "final_frame_velocity_change": 2.2218772525065836e-05,
+        "reynolds": 39840.6374501992,
+        "pressure_drop_pa": 316.7572669004469,
+        "backflow": false,
+        "note": "Finite-time RANS result; small divergence alone does not establish steady convergence."
+      },
+      "scope": "Numerical smoke check only; pressure accuracy not validated"
+    },
+    {
+      "config": {
+        "scenario": "contraction",
+        "nx": 1024,
+        "ny": 256,
+        "length": 0.6,
+        "height": 0.04,
+        "speed": 1.0,
+        "rho": 998.2,
+        "nu": 1.004e-06,
+        "duration": 1e-06,
+        "frames": 2,
+        "intensity": 0.05,
+        "top": "wall",
+        "bottom": "wall"
+      },
+      "seconds": 0.30566464900039136,
+      "diagnostics": {
+        "steps": 1,
+        "max_divergence": 3.721424945979379e-09,
+        "mass_imbalance": 1.3530843112619095e-14,
+        "side_flow_m2_s": 0.0,
+        "stored_frames": 2,
+        "pressure_solver": "cg-spectral",
+        "final_frame_velocity_change": 8.140211375926673e-05,
+        "reynolds": 39840.6374501992,
+        "pressure_drop_pa": 4156.874657476139,
+        "backflow": false,
+        "note": "Finite-time RANS result; small divergence alone does not establish steady convergence."
+      },
+      "scope": "Numerical smoke check only; pressure accuracy not validated"
+    },
+    {
+      "config": {
+        "scenario": "expansion",
+        "nx": 1024,
+        "ny": 256,
+        "length": 0.6,
+        "height": 0.04,
+        "speed": 1.0,
+        "rho": 998.2,
+        "nu": 1.004e-06,
+        "duration": 1e-06,
+        "frames": 2,
+        "intensity": 0.05,
+        "top": "wall",
+        "bottom": "wall"
+      },
+      "seconds": 0.3189528729999438,
+      "diagnostics": {
+        "steps": 1,
+        "max_divergence": 1.014655026665423e-09,
+        "mass_imbalance": 1.3877787807814457e-15,
+        "side_flow_m2_s": 0.0,
+        "stored_frames": 2,
+        "pressure_solver": "cg-spectral",
+        "final_frame_velocity_change": 2.109301768762989e-05,
+        "reynolds": 39840.6374501992,
+        "pressure_drop_pa": 352.5323518859971,
+        "backflow": false,
+        "note": "Finite-time RANS result; small divergence alone does not establish steady convergence."
+      },
+      "scope": "Numerical smoke check only; pressure accuracy not validated"
+    },
+    {
+      "config": {
+        "scenario": "cylinder",
+        "nx": 1024,
+        "ny": 256,
+        "length": 0.6,
+        "height": 0.04,
+        "speed": 1.0,
+        "rho": 998.2,
+        "nu": 1.004e-06,
+        "duration": 1e-06,
+        "frames": 2,
+        "intensity": 0.05,
+        "top": "wall",
+        "bottom": "wall"
+      },
+      "seconds": 0.3552323880003314,
+      "diagnostics": {
+        "steps": 1,
+        "max_divergence": 1.723492459859699e-09,
+        "mass_imbalance": 4.85722573273506e-15,
+        "side_flow_m2_s": 0.0,
+        "stored_frames": 2,
+        "pressure_solver": "cg-spectral",
+        "final_frame_velocity_change": 5.202931935320849e-05,
+        "reynolds": 39840.6374501992,
+        "pressure_drop_pa": 1713.9615189689428,
+        "backflow": false,
+        "note": "Finite-time RANS result; small divergence alone does not establish steady convergence."
+      },
+      "scope": "Numerical smoke check only; pressure accuracy not validated"
+    },
+    {
+      "config": {
+        "scenario": "baffles",
+        "nx": 1024,
+        "ny": 256,
+        "length": 0.6,
+        "height": 0.04,
+        "speed": 1.0,
+        "rho": 998.2,
+        "nu": 1.004e-06,
+        "duration": 1e-06,
+        "frames": 2,
+        "intensity": 0.05,
+        "top": "wall",
+        "bottom": "wall"
+      },
+      "seconds": 0.37732850800011875,
+      "diagnostics": {
+        "steps": 1,
+        "max_divergence": 3.8072130337241106e-08,
+        "mass_imbalance": 4.649058915617843e-14,
+        "side_flow_m2_s": 0.0,
+        "stored_frames": 2,
+        "pressure_solver": "cg-spectral",
+        "final_frame_velocity_change": 0.00026910254186769423,
+        "reynolds": 39840.6374501992,
+        "pressure_drop_pa": 14373.519500479953,
+        "backflow": false,
+        "note": "Finite-time RANS result; small divergence alone does not establish steady convergence."
+      },
+      "scope": "Numerical smoke check only; pressure accuracy not validated"
+    }
+  ]
+}
