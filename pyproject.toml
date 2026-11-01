@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flowdesk"
-version = "0.2.0"
+version = "0.3.0"
 description = "Desktop 2D incompressible RANS k-epsilon flow laboratory"
 requires-python = ">=3.11"
-dependencies = ["numpy>=1.26,<3", "scipy>=1.12,<2", "PySide6>=6.7,<7", "pyqtgraph>=0.13.7,<0.15"]
+dependencies = ["numpy>=1.26,<2.6", "scipy>=1.15,<2", "PySide6>=6.7,<7", "pyqtgraph>=0.13.7,<0.15", "numba>=0.68,<0.69", "pyamg>=5.4,<6", "threadpoolctl>=3.6,<4"]
 
 [project.optional-dependencies]
 test = ["pytest>=8,<10"]

@@ -55,6 +55,14 @@ class Window(QtWidgets.QMainWindow):
         left.addWidget(QtWidgets.QLabel("Лаборатория течений · вода · 2D"))
         self.scenario = QtWidgets.QComboBox()
         self.scenario.addItems(list(SCENARIOS.values()))
+        self.mode = QtWidgets.QComboBox()
+        self.mode.addItems(["Стационарный · SIMPLE", "Нестационарный"])
+        self.iterations = QtWidgets.QSpinBox()
+        self.iterations.setRange(10, 10000)
+        self.iterations.setValue(1000)
+        self.tolerance = self.number(1e-8, 1e-2, 1e-4, "", 8)
+        self.coarse = QtWidgets.QCheckBox("Начать с грубой сетки")
+        self.coarse.setChecked(True)
         self.grid = QtWidgets.QComboBox()
         self.grid.addItems([f"{nx} × {ny}" for nx, ny in GRID_PRESETS]+["Своя сетка"])
         self.grid.setCurrentIndex(1)
@@ -76,7 +84,9 @@ class Window(QtWidgets.QMainWindow):
         self.length = self.number(.1, 3, .6, " м")
         self.height = self.number(.01, .2, .04, " м", 3)
         form = QtWidgets.QFormLayout()
-        for label, widget in (("Сценарий", self.scenario), ("Сетка", self.grid),
+        for label, widget in (("Сценарий", self.scenario), ("Режим", self.mode),
+                              ("Макс. итераций", self.iterations), ("Невязка", self.tolerance),
+                              ("Начальное поле", self.coarse), ("Сетка", self.grid),
                               ("Ячеек по X", self.nx), ("Ячеек по Y", self.ny),
                               ("Верхняя граница", self.top), ("Нижняя граница", self.bottom),
                               ("Кадров", self.frames),
@@ -84,6 +94,7 @@ class Window(QtWidgets.QMainWindow):
                               ("Длина", self.length), ("Высота области", self.height)):
             form.addRow(label, widget)
         left.addLayout(form)
+        self.duration_caption = form.labelForField(self.duration)
         self.memory = QtWidgets.QLabel()
         self.memory.setWordWrap(True)
         left.addWidget(self.memory)
@@ -91,8 +102,10 @@ class Window(QtWidgets.QMainWindow):
         self.nx.valueChanged.connect(self.mesh_changed)
         self.ny.valueChanged.connect(self.mesh_changed)
         self.frames.valueChanged.connect(self.update_memory)
+        self.mode.currentIndexChanged.connect(self.mode_changed)
         self.update_memory()
-        self.settings = [self.scenario, self.grid, self.nx, self.ny, self.top, self.bottom,
+        self.settings = [self.scenario, self.mode, self.iterations, self.tolerance, self.coarse,
+                         self.grid, self.nx, self.ny, self.top, self.bottom,
                          self.frames, self.speed, self.duration, self.length, self.height]
         self.run_button = QtWidgets.QPushButton("Рассчитать кадры")
         self.run_button.clicked.connect(self.start)
@@ -115,6 +128,10 @@ class Window(QtWidgets.QMainWindow):
         save.clicked.connect(self.save)
         load = QtWidgets.QPushButton("Открыть результат…")
         load.clicked.connect(self.load)
+        self.residual_button = QtWidgets.QPushButton("Невязки SIMPLE…")
+        self.residual_button.setEnabled(False)
+        self.residual_button.clicked.connect(self.show_residuals)
+        left.addWidget(self.residual_button)
         left.addWidget(save)
         left.addWidget(load)
         scroll = QtWidgets.QScrollArea()
@@ -182,6 +199,7 @@ class Window(QtWidgets.QMainWindow):
         self.timer.timeout.connect(self.tick)
         self.timer.start(33)
         self.last_tick = time.perf_counter()
+        self.mode_changed()
         self.setStyleSheet("""
             QMainWindow, QWidget { background: #101c2b; color: #e1eaf5; font-size: 13px; }
             QPushButton { background: #20384d; border: 1px solid #35536a; border-radius: 6px; padding: 9px; }
@@ -205,6 +223,9 @@ class Window(QtWidgets.QMainWindow):
         if self.process is not None:
             return
         c = Config(scenario=list(SCENARIOS)[self.scenario.currentIndex()],
+                   mode="steady" if self.mode.currentIndex() == 0 else "transient",
+                   max_iterations=self.iterations.value(), tolerance=self.tolerance.value(),
+                   coarse_start=self.coarse.isChecked(),
                    nx=self.nx.value(), ny=self.ny.value(), frames=self.frames.value(),
                    top=["wall", "open"][self.top.currentIndex()],
                    bottom=["wall", "open"][self.bottom.currentIndex()],
@@ -213,6 +234,7 @@ class Window(QtWidgets.QMainWindow):
         self.playing = False
         self.play.setText("▶ Воспроизвести")
         self.messages = self.context.Queue()
+        self.calculation_mode = c.mode
         self.cancel_event = self.context.Event()
         self.process = self.context.Process(target=calculate, args=(c, self.messages, self.cancel_event))
         self.process.start()
@@ -220,7 +242,18 @@ class Window(QtWidgets.QMainWindow):
             widget.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self.progress.setValue(0)
-        self.info.setText("Расчёт RANS / k–ε…\nИнтерфейс остаётся доступен.")
+        self.info.setText("Расчёт RANS / k–ε…\nПервый запуск компилирует численные ядра.\nИнтерфейс остаётся доступен.")
+
+    def mode_changed(self, *_):
+        steady = self.mode.currentIndex() == 0
+        enabled = self.process is None
+        self.run_button.setText("Рассчитать SIMPLE" if steady else "Рассчитать кадры")
+        self.duration_caption.setText("Цикл анимации" if steady else "Время расчёта")
+        self.frames.setEnabled(enabled and not steady)
+        for control in (self.iterations, self.tolerance, self.coarse):
+            control.setEnabled(enabled and steady)
+        self.duration.setToolTip("В SIMPLE это длительность воспроизведения, не физического расчёта" if steady else "Длительность физического расчёта")
+        self.update_memory()
 
     def set_mesh(self, nx, ny):
         for control, value in ((self.nx, nx), (self.ny, ny)):
@@ -240,10 +273,11 @@ class Window(QtWidgets.QMainWindow):
         self.set_mesh(self.nx.value(), self.ny.value())
 
     def update_memory(self, *_):
-        c = Config(nx=self.nx.value(), ny=self.ny.value(), frames=self.frames.value())
+        c = Config(nx=self.nx.value(), ny=self.ny.value(), frames=self.frames.value(),
+                   mode="steady" if self.mode.currentIndex() == 0 else "transient")
         mib = c.nx*c.ny*c.frame_count*5*4/1024**2
         self.memory.setText(f"Сохранится {c.frame_count} кадров · поля {mib:.1f} МиБ."
-            + ("\nКадры сокращены до бюджета 256 МиБ." if c.frame_count < c.frames else "")
+            + ("\nSIMPLE: одно итоговое поле, анимация маркеров." if c.mode == "steady" else "\nКадры сокращены до бюджета 256 МиБ." if c.frame_count < c.frames else "")
             + ("\nКрупная сетка: расчёт существенно дольше; мелкая сетка у стенки не гарантирует точность k–ε." if c.nx*c.ny > 65536 else ""))
 
     def finish_worker(self):
@@ -253,6 +287,7 @@ class Window(QtWidgets.QMainWindow):
         for widget in self.settings+[self.run_button]:
             widget.setEnabled(True)
         self.cancel_button.setEnabled(False)
+        self.mode_changed()
 
     def cancel(self):
         if self.process is not None:
@@ -269,7 +304,8 @@ class Window(QtWidgets.QMainWindow):
                     if kind == "progress":
                         i, n, t = value
                         self.progress.setValue(round(i/n*100))
-                        self.info.setText(f"Кадр {i}/{n} · t = {t:.3f} с")
+                        self.info.setText(f"SIMPLE · {'грубая сетка · ' if t < 0 else ''}итерация {i}/{n}" if self.calculation_mode == "steady"
+                                          else f"Кадр {i}/{n} · t = {t:.3f} с")
                     else:
                         self.finish_worker()
                         if kind == "result":
@@ -302,13 +338,21 @@ class Window(QtWidgets.QMainWindow):
         self.particles.setData([], [])
         self.play.setEnabled(True)
         d = result.diagnostics
-        self.info.setText(f"Расчёт завершён · {d.get('wall_seconds', 0):.2f} с\n"
+        self.residual_button.setEnabled(bool(d.get("residual_history")))
+        state = (f"SIMPLE: {'сошлось' if d['converged'] else 'НЕ СОШЛОСЬ — достигнут лимит'}\n"
+                 f"Итераций: {d['iterations']}; макс. невязка: {max(d['residuals'].values()):.2e}\n"
+                 if result.config.mode == "steady" else "")
+        self.info.setText(state+f"Расчёт завершён · {d.get('wall_seconds', 0):.2f} с\n"
             f"Re = {d['reynolds']:.0f}\nΔp вход–выход = {d['pressure_drop_pa']:.2f} Па\n"
             f"Небаланс расхода: {d['mass_imbalance']:.2e}\n"
-            f"Изменение u между последними кадрами: {d['final_frame_velocity_change']:.2e}\n"
+            + (f"Изменение u между последними кадрами: {d['final_frame_velocity_change']:.2e}\n" if result.config.mode == "transient" else "")
             + ("Обратный поток на выходе: увеличьте длину канала.\n" if d['backflow'] else "")
             + "Сходимость и точность см. в отчёте проверки.")
         c = result.config
+        self.mode.setCurrentIndex(0 if c.mode == "steady" else 1)
+        self.iterations.setValue(c.max_iterations)
+        self.tolerance.setValue(c.tolerance)
+        self.coarse.setChecked(c.coarse_start)
         self.scenario.setCurrentIndex(list(SCENARIOS).index(c.scenario))
         self.top.setCurrentIndex(0 if c.top == "wall" else 1)
         self.bottom.setCurrentIndex(0 if c.bottom == "wall" else 1)
@@ -353,7 +397,7 @@ class Window(QtWidgets.QMainWindow):
         field = np.hypot(u, v) if self.field.currentIndex() == 0 else blend(r.pressure)
         self.image.setImage(np.where(r.fluid, field, np.nan), autoLevels=False)
         self.slider.setValue(round(t/r.config.duration*10000))
-        self.time_label.setText(f"t = {t:.3f} с")
+        self.time_label.setText(f"{'Анимация' if r.config.mode == 'steady' else 't'} = {t:.3f} с")
         self.line.setVisible(self.show_lines.isChecked())
         self.particles.setVisible(self.show_lines.isChecked())
         if self.show_lines.isChecked():
@@ -397,6 +441,29 @@ class Window(QtWidgets.QMainWindow):
                 self.result.save(path if path.endswith(".npz") else path+".npz")
             except Exception as exc:
                 QtWidgets.QMessageBox.critical(self, "Ошибка сохранения", str(exc))
+
+    def show_residuals(self):
+        if self.result is None or not self.result.diagnostics.get("residual_history"):
+            return
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Невязки стационарного SIMPLE")
+        dialog.resize(760, 480)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        plot = pg.PlotWidget()
+        plot.setLogMode(y=True)
+        plot.addLegend()
+        plot.setLabel("bottom", "Итерация")
+        plot.setLabel("left", "Нормированная невязка")
+        history = self.result.diagnostics["residual_history"]
+        x = [row["iteration"] for row in history]
+        for key, color in zip(("u", "v", "k", "e", "continuity"),
+                              ("#5eead4", "#60a5fa", "#fbbf24", "#f472b6", "#c4b5fd")):
+            plot.plot(x, [max(row[key], 1e-16) for row in history], pen=color, name=key)
+        plot.addItem(pg.InfiniteLine(pos=np.log10(self.result.config.tolerance), angle=0,
+                                    pen=pg.mkPen("#ffffff", style=QtCore.Qt.PenStyle.DashLine)))
+        layout.addWidget(plot)
+        layout.addWidget(QtWidgets.QLabel("Сходимость требует всех невязок ниже порога три итерации подряд."))
+        dialog.exec()
 
     def load(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Открыть расчёт", "", "FlowDesk (*.npz)")

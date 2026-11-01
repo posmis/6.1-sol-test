@@ -7,8 +7,10 @@ Smooth equilibrium wall functions model wall stress.
 from dataclasses import dataclass, asdict
 import json
 import numpy as np
+from threadpoolctl import threadpool_limits
 from .scenarios import SCENARIOS, geometry
 from .pressure import PressureSolver
+from .kernels import diffuse as diffusion, advect as upwind, scalar_transport
 
 
 @dataclass(frozen=True)
@@ -26,9 +28,15 @@ class Config:
     intensity: float = 0.05
     top: str = "wall"
     bottom: str = "wall"
+    mode: str = "transient"
+    max_iterations: int = 1000
+    tolerance: float = 1e-4
+    coarse_start: bool = True
 
     @property
     def frame_count(self):
+        if self.mode == "steady":
+            return 2
         # At most 256 MiB of stored float32 fields, independent of requested mesh.
         return min(self.frames, max(2, (256*1024**2)//(self.nx*self.ny*5*4)))
 
@@ -40,6 +48,10 @@ class Config:
             raise ValueError("Grid must be 16..1024 × 8..1024")
         if self.top not in ("wall", "open") or self.bottom not in ("wall", "open"):
             raise ValueError("Top and bottom boundaries must be wall or open")
+        if self.mode not in ("transient", "steady") or not 10 <= self.max_iterations <= 10000:
+            raise ValueError("Invalid solution mode or iteration limit")
+        if not np.isfinite(self.tolerance) or not 1e-8 <= self.tolerance <= 1e-2:
+            raise ValueError("Tolerance must be between 1e-8 and 1e-2")
         for name in ("length", "height", "speed", "rho", "nu", "duration"):
             if not np.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be finite and positive")
@@ -83,29 +95,6 @@ class Result:
             ):
                 raise ValueError("Invalid result dimensions or non-finite fields")
             return cls(cfg, **arrays, diagnostics=json.loads(str(z["diagnostics"])))
-
-
-def diffusion(q, nu, mask, dx, dy):
-    """Conservative diffusion; absent neighbours have zero normal flux."""
-    out = np.zeros_like(q)
-    for axis, spacing in ((0, dy), (1, dx)):
-        a = [slice(None), slice(None)]
-        b = a.copy()
-        a[axis], b[axis] = slice(None, -1), slice(1, None)
-        a, b = tuple(a), tuple(b)
-        flux = (q[b] - q[a]) * (nu[a] + nu[b]) * 0.5 / spacing**2
-        flux *= mask[a] & mask[b]
-        out[a] += flux
-        out[b] -= flux
-    return out
-
-
-def upwind(q, ax, ay, dx, dy):
-    p = np.pad(q, 1, mode="edge")
-    return (np.maximum(ax, 0)*(q-p[1:-1, :-2])/dx
-            + np.minimum(ax, 0)*(p[1:-1, 2:]-q)/dx
-            + np.maximum(ay, 0)*(q-p[:-2, 1:-1])/dy
-            + np.minimum(ay, 0)*(p[2:, 1:-1]-q)/dy)
 
 
 class Solver:
@@ -230,18 +219,7 @@ class Solver:
         production[self.wall] = wallprod[self.wall]
         # Conservative donor-cell scalar fluxes with specified inlet values.
         def transport(q, inlet):
-            xq = np.pad(q, ((0, 0), (1, 1)), mode="edge")
-            xq[:, 0] = inlet
-            yq = np.pad(q, ((1, 1), (0, 0)), mode="edge")
-            # Ambient turbulence on inflow through pressure-open sides/outlet.
-            xq[:, -1] = np.where(self.u[:, -1] < 0, inlet, xq[:, -1])
-            if c.bottom == "open":
-                yq[0] = np.where(self.v[0] > 0, inlet, yq[0])
-            if c.top == "open":
-                yq[-1] = np.where(self.v[-1] < 0, inlet, yq[-1])
-            qx = self.u*np.where(self.u >= 0, xq[:, :-1], xq[:, 1:])
-            qy = self.v*np.where(self.v >= 0, yq[:-1], yq[1:])
-            return -np.diff(qx, axis=1)/dx-np.diff(qy, axis=0)/dy
+            return scalar_transport(q, self.u, self.v, inlet, dx, dy)
         oldk = self.k.copy()
         self.k = np.maximum((self.k+dt*(transport(self.k, self.kin)
                     +diffusion(self.k, c.nu+nut, self.fluid, dx, dy)+production))
@@ -257,7 +235,11 @@ class Solver:
             raise FloatingPointError("Solution diverged. Reduce speed or refine the grid.")
         return dt
 
+    @threadpool_limits.wrap(limits=1, user_api="blas")
     def run(self, progress=None, cancel=None):
+        if self.c.mode == "steady":
+            from .steady import solve
+            return solve(self, progress, cancel)
         self.solve_p.cancel = cancel
         times = np.linspace(0, self.c.duration, self.c.frame_count)
         fields = [np.empty((len(times), self.c.ny, self.c.nx), np.float32) for _ in range(5)]

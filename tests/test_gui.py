@@ -15,6 +15,7 @@ def test_desktop_calculate_play_save_load(tmp_path):
     _app = app
     window = Window()
     window.show()
+    window.mode.setCurrentIndex(1)
     assert window.scenario.count() == 6
     window.grid.setCurrentIndex(6)
     assert window.nx.value() == window.ny.value() == 1024
@@ -59,6 +60,35 @@ def test_desktop_calculate_play_save_load(tmp_path):
         assert not window.line.isVisible()
         assert window.run_button.isEnabled()
         assert window.grab().width() > 0
+    finally:
+        window.close()
+        window.deleteLater()
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+        app.processEvents()
+
+
+def test_steady_gui_reports_iteration_limit_and_animation():
+    global _app
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _app = app
+    window = Window()
+    window.show()
+    window.set_mesh(32, 12)
+    window.iterations.setValue(10)
+    assert window.mode.currentIndex() == 0
+    assert not window.frames.isEnabled()
+    window.start()
+    deadline = time.monotonic()+60
+    while window.process is not None and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(.01)
+    try:
+        assert window.result is not None
+        assert window.result.config.mode == "steady"
+        assert "НЕ СОШЛОСЬ" in window.info.text()
+        assert "Анимация" in window.time_label.text()
+        assert not window.result.diagnostics["converged"]
+        np.testing.assert_array_equal(window.result.u[0], window.result.u[1])
     finally:
         window.close()
         window.deleteLater()

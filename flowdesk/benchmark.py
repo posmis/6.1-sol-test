@@ -8,6 +8,7 @@ from dataclasses import asdict
 import numpy as np
 import scipy
 from .solver import Config, Solver
+from .scenarios import SCENARIOS
 
 
 def channel_check(result):
@@ -35,6 +36,7 @@ def main():
     parser.add_argument("--output", default="results/validation.json")
     parser.add_argument("--save-frames", action="store_true")
     parser.add_argument("--extended", action="store_true", help="Also run new geometries and large-grid single-step checks")
+    parser.add_argument("--steady", action="store_true", help="Validate converged SIMPLE solutions for every scenario")
     args = parser.parse_args()
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -74,9 +76,26 @@ def main():
             key = "large_grid_single_step" if c.frames == 2 else "additional_scenarios"
             report[key].append(row)
             print(f"{c.scenario} {c.nx}x{c.ny}: {row['seconds']:.2f}s ({c.duration:g}s simulated)", flush=True)
+    steady_ok = True
+    if args.steady:
+        report["steady"] = []
+        for name in SCENARIOS:
+            c = Config(mode="steady", scenario=name)
+            start = time.perf_counter()
+            result = Solver(c).run()
+            row = dict(config=asdict(c), seconds=time.perf_counter()-start, diagnostics=result.diagnostics)
+            if name == "channel":
+                row["pressure_check"] = channel_check(result)
+                steady_ok &= row["pressure_check"]["within_10_percent"]
+            steady_ok &= result.diagnostics["converged"]
+            report["steady"].append(row)
+            print(f"SIMPLE {name}: converged={result.diagnostics['converged']}, "
+                  f"iterations={result.diagnostics['iterations']}, {row['seconds']:.2f}s", flush=True)
+            if args.save_frames:
+                result.save(output.parent/f"{name}_steady.npz")
     output.write_text(json.dumps(report, indent=2)+"\n")
     print(f"Saved {output}", flush=True)
-    return 0 if all(row["pressure_check"]["within_10_percent"] for row in report["channel"]) else 1
+    return 0 if steady_ok and all(row["pressure_check"]["within_10_percent"] for row in report["channel"]) else 1
 
 
 if __name__ == "__main__":
