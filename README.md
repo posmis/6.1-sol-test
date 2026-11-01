@@ -15,6 +15,17 @@
 - **Linux / macOS:** `bash run.sh`. На Linux нужен рабочий графический сеанс и
   системные библиотеки Qt/X11. В облачной среде проверен запуск через Qt offscreen.
 
+Для тестов без экрана на Ubuntu/Debian нужны и системные зависимости Qt
+(Python-пакет PySide6 не включает их):
+
+```sh
+sudo apt-get update
+sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libdbus-1-3
+QT_QPA_PLATFORM=offscreen python -m pytest -q
+```
+
+Режим `offscreen` не отменяет зависимость QtGui от `libEGL.so.1`.
+
 Либо установите вручную:
 
 ```sh
