@@ -36,6 +36,8 @@ class Window(QtWidgets.QMainWindow):
         self.resize(1240, 780)
         self.result = None
         self.process = None
+        self.custom_mesh_path = None
+        self.mesh_editors = []
         self.playing = False
         self.position = 0.
         self.paths = []
@@ -53,8 +55,17 @@ class Window(QtWidgets.QMainWindow):
         title.setStyleSheet("font-size: 27px; font-weight: 700; color: #5eead4")
         left.addWidget(title)
         left.addWidget(QtWidgets.QLabel("Лаборатория течений · вода · 2D"))
+        mesh_editor_button = QtWidgets.QPushButton("Геометрия и сетка (DXF)…")
+        mesh_editor_button.clicked.connect(self.open_mesh_editor)
+        mesh_load_button = QtWidgets.QPushButton("Загрузить свою сетку .flowmesh…")
+        mesh_load_button.clicked.connect(self.load_mesh)
+        left.addWidget(mesh_editor_button)
+        left.addWidget(mesh_load_button)
+        self.mesh_info = QtWidgets.QLabel()
+        self.mesh_info.setWordWrap(True)
+        left.addWidget(self.mesh_info)
         self.scenario = QtWidgets.QComboBox()
-        self.scenario.addItems(list(SCENARIOS.values()))
+        self.scenario.addItems(list(SCENARIOS.values())+["Своя модель (DXF / .flowmesh)"])
         self.mode = QtWidgets.QComboBox()
         self.mode.addItems(["Стационарный · SIMPLE", "Нестационарный"])
         self.iterations = QtWidgets.QSpinBox()
@@ -103,8 +114,9 @@ class Window(QtWidgets.QMainWindow):
         self.ny.valueChanged.connect(self.mesh_changed)
         self.frames.valueChanged.connect(self.update_memory)
         self.mode.currentIndexChanged.connect(self.mode_changed)
+        self.scenario.currentIndexChanged.connect(self.mode_changed)
         self.update_memory()
-        self.settings = [self.scenario, self.mode, self.iterations, self.tolerance, self.coarse,
+        self.settings = [mesh_editor_button, mesh_load_button, self.scenario, self.mode, self.iterations, self.tolerance, self.coarse,
                          self.grid, self.nx, self.ny, self.top, self.bottom,
                          self.frames, self.speed, self.duration, self.length, self.height]
         self.run_button = QtWidgets.QPushButton("Рассчитать кадры")
@@ -134,6 +146,10 @@ class Window(QtWidgets.QMainWindow):
         left.addWidget(self.residual_button)
         left.addWidget(save)
         left.addWidget(load)
+        self.native_export = QtWidgets.QPushButton("Поля на исходной сетке (.vtu)…")
+        self.native_export.setEnabled(False)
+        self.native_export.clicked.connect(self.export_native)
+        left.addWidget(self.native_export)
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setWidget(sidebar)
@@ -179,6 +195,10 @@ class Window(QtWidgets.QMainWindow):
         self.boundaries = [pg.PlotCurveItem(), pg.PlotCurveItem()]
         for line in self.boundaries:
             self.plot.addItem(line)
+        self.custom_lines = {tag: pg.PlotCurveItem(pen=pg.mkPen(color, width=2), connect="finite")
+            for tag, color in dict(inlet="#5eead4", outlet="#60a5fa", wall="#fbbf24", open="#c4b5fd").items()}
+        for line in self.custom_lines.values():
+            self.plot.addItem(line)
         right.addWidget(self.graphics, 1)
         controls = QtWidgets.QHBoxLayout()
         self.play = QtWidgets.QPushButton("▶ Воспроизвести")
@@ -222,7 +242,13 @@ class Window(QtWidgets.QMainWindow):
     def start(self):
         if self.process is not None:
             return
-        c = Config(scenario=list(SCENARIOS)[self.scenario.currentIndex()],
+        custom = self.scenario.currentIndex() == len(SCENARIOS)
+        if custom and not self.custom_mesh_path:
+            self.load_mesh()
+            if not self.custom_mesh_path:
+                return
+        c = Config(scenario="custom" if custom else list(SCENARIOS)[self.scenario.currentIndex()],
+                   mesh_path=self.custom_mesh_path if custom else None,
                    mode="steady" if self.mode.currentIndex() == 0 else "transient",
                    max_iterations=self.iterations.value(), tolerance=self.tolerance.value(),
                    coarse_start=self.coarse.isChecked(),
@@ -245,8 +271,14 @@ class Window(QtWidgets.QMainWindow):
         self.info.setText("Расчёт RANS / k–ε…\nПервый запуск компилирует численные ядра.\nИнтерфейс остаётся доступен.")
 
     def mode_changed(self, *_):
+        custom = self.scenario.currentIndex() == len(SCENARIOS)
+        if custom and self.mode.currentIndex() != 0:
+            self.mode.setCurrentIndex(0)
         steady = self.mode.currentIndex() == 0
         enabled = self.process is None
+        self.mode.setEnabled(enabled and not custom)
+        for control in (self.grid, self.nx, self.ny, self.length, self.height, self.top, self.bottom):
+            control.setEnabled(enabled and not custom)
         self.run_button.setText("Рассчитать SIMPLE" if steady else "Рассчитать кадры")
         self.duration_caption.setText("Цикл анимации" if steady else "Время расчёта")
         self.frames.setEnabled(enabled and not steady)
@@ -254,6 +286,41 @@ class Window(QtWidgets.QMainWindow):
             control.setEnabled(enabled and steady)
         self.duration.setToolTip("В SIMPLE это длительность воспроизведения, не физического расчёта" if steady else "Длительность физического расчёта")
         self.update_memory()
+
+    def open_mesh_editor(self):
+        from .mesh_gui import MeshEditor
+        editor = MeshEditor(self)
+        editor.mesh_ready.connect(self.use_custom_mesh)
+        editor.show()
+        self.mesh_editors.append(editor)
+
+    def load_mesh(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Своя модель", "", "FlowDesk Mesh (*.flowmesh)")
+        if path:
+            try:
+                self.use_custom_mesh(path)
+            except Exception as exc:
+                QtWidgets.QMessageBox.warning(self, "Ошибка сетки", str(exc))
+
+    def use_custom_mesh(self, path):
+        from .meshing import MeshProject
+        from pathlib import Path
+        if self.process is not None:
+            QtWidgets.QMessageBox.information(self, "Расчёт выполняется", "Дождитесь завершения или отмените текущий расчёт, затем загрузите сохранённый проект сетки.")
+            return
+        project = MeshProject.load(path)
+        self.custom_mesh_path = str(Path(path).resolve())
+        xmin, ymin, xmax, ymax = project.geometry.bounds
+        for control in (self.length, self.height):
+            control.setDecimals(7)
+            control.setRange(1e-7, 1e6)
+        self.length.setValue(xmax-xmin)
+        self.height.setValue(ymax-ymin)
+        self.set_mesh(256, max(8, min(256, round(256*(ymax-ymin)/(xmax-xmin)))))
+        self.scenario.setCurrentIndex(len(SCENARIOS))
+        self.mesh_info.setText(f"Своя модель: {len(project.cells)} реальных элементов.\n"
+            "Границы и размер элементов заданы в утилите. Nx/Ny ниже — только пиксели отображения.")
+        self.mode_changed()
 
     def set_mesh(self, nx, ny):
         for control, value in ((self.nx, nx), (self.ny, ny)):
@@ -338,6 +405,7 @@ class Window(QtWidgets.QMainWindow):
         self.particles.setData([], [])
         self.play.setEnabled(True)
         d = result.diagnostics
+        self.native_export.setEnabled(result.native is not None)
         self.residual_button.setEnabled(bool(d.get("residual_history")))
         state = (f"SIMPLE: {'сошлось' if d['converged'] else 'НЕ СОШЛОСЬ — достигнут лимит'}\n"
                  f"Итераций: {d['iterations']}; макс. невязка: {max(d['residuals'].values()):.2e}\n"
@@ -353,7 +421,17 @@ class Window(QtWidgets.QMainWindow):
         self.iterations.setValue(c.max_iterations)
         self.tolerance.setValue(c.tolerance)
         self.coarse.setChecked(c.coarse_start)
-        self.scenario.setCurrentIndex(list(SCENARIOS).index(c.scenario))
+        if c.scenario == "custom":
+            for control in (self.length, self.height):
+                control.setDecimals(7)
+                control.setRange(1e-7, 1e6)
+            self.custom_mesh_path = c.mesh_path
+            self.scenario.setCurrentIndex(len(SCENARIOS))
+            self.mesh_info.setText(f"Своя модель: {d.get('mesh_cells', 0)} реальных элементов.\n"
+                "Результат содержит поля на исходной сетке. Nx/Ny — пиксели отображения.")
+        else:
+            self.scenario.setCurrentIndex(list(SCENARIOS).index(c.scenario))
+            self.mesh_info.setText("")
         self.top.setCurrentIndex(0 if c.top == "wall" else 1)
         self.bottom.setCurrentIndex(0 if c.bottom == "wall" else 1)
         self.frames.setValue(c.frames)
@@ -363,6 +441,14 @@ class Window(QtWidgets.QMainWindow):
         self.set_mesh(c.nx, c.ny)
         self.image.setImage(np.zeros((c.ny, c.nx)), autoLevels=False)
         self.image.setRect(QtCore.QRectF(0, 0, c.length, c.height))
+        for tag, line in self.custom_lines.items():
+            line.setVisible(result.native is not None)
+            if result.native is not None:
+                native = result.native
+                points = native["points"]-native["points"].min(axis=0)
+                edges = points[native["boundary_edges"][native["boundary_tags"] == tag]]
+                joined = np.concatenate([edges, np.full((len(edges), 1, 2), np.nan)], axis=1).reshape(-1, 2)
+                line.setData(joined[:, 0], joined[:, 1])
         for line, boundary, row, y in zip(self.boundaries, (c.bottom, c.top),
                                          (result.fluid[0], result.fluid[-1]), (0, c.height)):
             # Leave geometric solids intact even when an outer edge is open.
@@ -370,6 +456,7 @@ class Window(QtWidgets.QMainWindow):
             line.setData(np.where(row, x, np.nan), np.full(c.nx, y), connect="finite")
             line.setPen(pg.mkPen("#60d5ed" if boundary == "open" else "#fbbf24", width=2,
                 style=QtCore.Qt.PenStyle.DashLine if boundary == "open" else QtCore.Qt.PenStyle.SolidLine))
+            line.setVisible(result.native is None)
         self.caption.setToolTip("Жёлтая граница — стенка. Голубая пунктирная — открытая граница давления.")
         self.plot.setRange(xRange=(0, c.length), yRange=(0, c.height), padding=.05)
         self.change_field()
@@ -465,6 +552,16 @@ class Window(QtWidgets.QMainWindow):
         layout.addWidget(QtWidgets.QLabel("Сходимость требует всех невязок ниже порога три итерации подряд."))
         dialog.exec()
 
+    def export_native(self):
+        if self.result is None or self.result.native is None:
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Поля на расчётных элементах", "flow.vtu", "VTK unstructured (*.vtu)")
+        if path:
+            try:
+                self.result.export_native(path if path.endswith(".vtu") else path+".vtu")
+            except Exception as exc:
+                QtWidgets.QMessageBox.warning(self, "Ошибка экспорта", str(exc))
+
     def load(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Открыть расчёт", "", "FlowDesk (*.npz)")
         if path:
@@ -476,6 +573,8 @@ class Window(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.critical(self, "Ошибка чтения", str(exc))
 
     def closeEvent(self, event):
+        for editor in self.mesh_editors:
+            editor.close()
         self.timer.stop()
         self.stream_pool.shutdown(wait=True, cancel_futures=True)
         if self.process is not None:

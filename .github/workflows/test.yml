@@ -7,10 +7,10 @@ jobs:
       QT_QPA_PLATFORM: offscreen
     steps:
       - uses: actions/checkout@v4
-      - name: Install Qt system libraries
+      - name: Install Qt and Gmsh system libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libegl1 libgl1 libxkbcommon0 libdbus-1-3
+          sudo apt-get install -y --no-install-recommends libegl1 libgl1 libglu1-mesa libxkbcommon0 libdbus-1-3 libxrender1 libxcursor1 libxfixes3 libxext6 libxft2 libxinerama1 libfontconfig1 libgomp1
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -20,7 +20,8 @@ jobs:
       - run: python -m pip install --no-deps -e .
       - run: python -m pytest -q
       - run: python -m flowdesk.benchmark --steady --output results/validation.json
+      - run: python -m flowdesk.mesh_check --output results/custom-mesh-validation.json
       - uses: actions/upload-artifact@v4
         with:
           name: validation
-          path: results/validation.json
+          path: results/*.json

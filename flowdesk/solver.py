@@ -32,6 +32,7 @@ class Config:
     max_iterations: int = 1000
     tolerance: float = 1e-4
     coarse_start: bool = True
+    mesh_path: str | None = None
 
     @property
     def frame_count(self):
@@ -41,8 +42,10 @@ class Config:
         return min(self.frames, max(2, (256*1024**2)//(self.nx*self.ny*5*4)))
 
     def validate(self):
-        if self.scenario not in SCENARIOS:
+        if self.scenario not in SCENARIOS and self.scenario != "custom":
             raise ValueError("Unknown scenario")
+        if self.scenario == "custom" and (not self.mesh_path or self.mode != "steady"):
+            raise ValueError("Для своей сетки нужен файл .flowmesh и стационарный SIMPLE")
         if not (isinstance(self.nx, int) and isinstance(self.ny, int)
                 and 16 <= self.nx <= 1024 and 8 <= self.ny <= 1024):
             raise ValueError("Grid must be 16..1024 × 8..1024")
@@ -70,12 +73,29 @@ class Result:
     epsilon: np.ndarray
     fluid: np.ndarray
     diagnostics: dict
+    native: dict | None = None
 
     def save(self, path):
+        extra = {"native_"+key: value for key, value in (self.native or {}).items()}
         np.savez_compressed(path, config=json.dumps(asdict(self.config)),
                             diagnostics=json.dumps(self.diagnostics), time=self.time,
                             u=self.u, v=self.v, pressure=self.pressure, k=self.k,
-                            epsilon=self.epsilon, fluid=self.fluid)
+                            epsilon=self.epsilon, fluid=self.fluid, **extra)
+
+    def export_native(self, path):
+        if self.native is None:
+            raise ValueError("В результате нет неструктурированной сетки")
+        import meshio
+        native = self.native
+        cells, data = [], {key: [] for key in ("u", "v", "pressure", "k", "epsilon")}
+        for count, kind in ((3, "triangle"), (4, "quad")):
+            mask = np.sum(native["cells"] >= 0, axis=1) == count
+            if mask.any():
+                cells.append((kind, native["cells"][mask, :count]))
+                for key in data:
+                    data[key].append(native[key][mask])
+        points = np.column_stack([native["points"], np.zeros(len(native["points"]))])
+        meshio.write(path, meshio.Mesh(points, cells, cell_data=data))
 
     @classmethod
     def load(cls, path):
@@ -94,13 +114,16 @@ class Result:
                 for key in ("u", "v", "pressure", "k", "epsilon")
             ):
                 raise ValueError("Invalid result dimensions or non-finite fields")
-            return cls(cfg, **arrays, diagnostics=json.loads(str(z["diagnostics"])))
+            native = {key[7:]: z[key].copy() for key in z.files if key.startswith("native_")}
+            return cls(cfg, **arrays, diagnostics=json.loads(str(z["diagnostics"])), native=native or None)
 
 
 class Solver:
     def __init__(self, config=Config()):
         config.validate()
         self.c = c = config
+        if c.scenario == "custom":
+            return
         self.dx, self.dy = c.length/c.nx, c.height/c.ny
         self.fluid = geometry(c)
         f = self.fluid
@@ -237,6 +260,9 @@ class Solver:
 
     @threadpool_limits.wrap(limits=1, user_api="blas")
     def run(self, progress=None, cancel=None):
+        if self.c.scenario == "custom":
+            from .unstructured import solve
+            return solve(self.c, progress, cancel)
         if self.c.mode == "steady":
             from .steady import solve
             return solve(self, progress, cancel)
