@@ -1,0 +1,109 @@
+{
+  "python": "3.12.14",
+  "numpy": "2.5.4",
+  "scipy": "1.18.1",
+  "channel": [
+    {
+      "grid": [
+        64,
+        16
+      ],
+      "seconds": 0.8502518389999523,
+      "diagnostics": {
+        "steps": 442,
+        "max_divergence": 8.403954615543441e-14,
+        "mass_imbalance": 1.734723475976807e-16,
+        "final_frame_velocity_change": 1.4058965699992244e-12,
+        "reynolds": 39840.6374501992,
+        "pressure_drop_pa": 92.82219323121758,
+        "backflow": false,
+        "note": "Finite-time RANS result; small divergence alone does not establish steady convergence."
+      },
+      "pressure_check": {
+        "stations_m": [
+          0.3890625,
+          0.5390625
+        ],
+        "pressure_drop_pa": 20.971900939941406,
+        "reference_pa": 19.34149873792123,
+        "relative_error": 0.0842955462817152,
+        "within_10_percent": true,
+        "comparison": "Dean smooth fully-developed plane-channel correlation, Cf=0.073 Re_H^-0.25",
+        "scope": "Selected downstream stations only; excludes entrance losses. Not experimental validation."
+      }
+    },
+    {
+      "grid": [
+        96,
+        24
+      ],
+      "seconds": 1.819712117999984,
+      "diagnostics": {
+        "steps": 632,
+        "max_divergence": 1.223318721268962e-13,
+        "mass_imbalance": 0.0,
+        "final_frame_velocity_change": 1.4300845706628052e-12,
+        "reynolds": 39840.6374501992,
+        "pressure_drop_pa": 94.32280942726833,
+        "backflow": false,
+        "note": "Finite-time RANS result; small divergence alone does not establish steady convergence."
+      },
+      "pressure_check": {
+        "stations_m": [
+          0.390625,
+          0.540625
+        ],
+        "pressure_drop_pa": 20.282865524291992,
+        "reference_pa": 19.34149873792123,
+        "relative_error": 0.04867082944948331,
+        "within_10_percent": true,
+        "comparison": "Dean smooth fully-developed plane-channel correlation, Cf=0.073 Re_H^-0.25",
+        "scope": "Selected downstream stations only; excludes entrance losses. Not experimental validation."
+      }
+    },
+    {
+      "grid": [
+        144,
+        36
+      ],
+      "seconds": 4.364549409000006,
+      "diagnostics": {
+        "steps": 931,
+        "max_divergence": 2.476630012182568e-13,
+        "mass_imbalance": 3.469446951953614e-16,
+        "final_frame_velocity_change": 1.324526788326358e-12,
+        "reynolds": 39840.6374501992,
+        "pressure_drop_pa": 95.038957994883,
+        "backflow": false,
+        "note": "Finite-time RANS result; small divergence alone does not establish steady convergence."
+      },
+      "pressure_check": {
+        "stations_m": [
+          0.38958333333333334,
+          0.5395833333333333
+        ],
+        "pressure_drop_pa": 20.12346839904785,
+        "reference_pa": 19.34149873792123,
+        "relative_error": 0.0404296312153658,
+        "within_10_percent": true,
+        "comparison": "Dean smooth fully-developed plane-channel correlation, Cf=0.073 Re_H^-0.25",
+        "scope": "Selected downstream stations only; excludes entrance losses. Not experimental validation."
+      }
+    }
+  ],
+  "step": {
+    "seconds": 2.829754067000067,
+    "diagnostics": {
+      "steps": 1010,
+      "max_divergence": 1.5543122344752192e-13,
+      "mass_imbalance": 1.734723475976807e-16,
+      "final_frame_velocity_change": 0.0032610970999828225,
+      "reynolds": 39840.6374501992,
+      "pressure_drop_pa": -161.95611343015042,
+      "backflow": false,
+      "note": "Finite-time RANS result; small divergence alone does not establish steady convergence."
+    },
+    "minimum_u": -0.2357502281665802,
+    "pressure_accuracy": "Not validated against experimental data"
+  }
+}
