@@ -110,13 +110,13 @@ def test_native_open_domain_preserves_uniform_flow(tmp_path):
     assert r.diagnostics["mass_imbalance"] < 1e-7
 
 
-def test_invalid_mesh_and_custom_transient_rejected(tmp_path):
+def test_invalid_mesh_and_missing_mesh_rejected(tmp_path):
     m = generate(example_geometry(), MeshSettings(target_cells=100))
     broken = replace(m, boundary_edges=m.boundary_edges[:-1], boundary_tags=m.boundary_tags[:-1])
     with pytest.raises(ValueError, match="грани"):
         broken.validate()
-    with pytest.raises(ValueError, match="стационарный"):
-        Config(scenario="custom", mesh_path="model.flowmesh").validate()
+    with pytest.raises(ValueError, match="flowmesh"):
+        Config(scenario="custom").validate()
 
 
 def test_target_search_keeps_best_attempt():

@@ -74,6 +74,7 @@ def test_steady_gui_reports_iteration_limit_and_animation():
     _app = app
     window = Window()
     window.show()
+    window.mode.setCurrentIndex(0)
     window.set_mesh(32, 12)
     window.iterations.setValue(10)
     assert window.mode.currentIndex() == 0
@@ -133,7 +134,9 @@ def test_mesh_editor_to_desktop_calculation(tmp_path, monkeypatch):
         editor.use()
         assert path.exists()
         assert window.scenario.currentIndex() == CUSTOM_INDEX
-        assert window.mode.currentIndex() == 0
+        assert window.mode.currentIndex() == 1
+        assert window.mode.isEnabled()
+        window.mode.setCurrentIndex(0)
         assert not window.nx.isEnabled()
         window.iterations.setValue(250)
         window.start()

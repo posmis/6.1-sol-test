@@ -65,7 +65,7 @@ def solve_profile(config, progress=None, cancel=None):
             if cancel is not None and cancel.is_set():
                 raise InterruptedError("Calculation cancelled")
             if progress:
-                progress(0, c.max_iterations, angle)
+                progress(0, c.max_iterations if c.mode == "steady" else c.frame_count-1, angle if c.mode == "steady" else 0.)
             geometry = profile_geometry(c.profile_chord, angle)
             chord = c.profile_chord
             h = chord*np.sqrt(4/c.profile_cells)
@@ -75,7 +75,7 @@ def solve_profile(config, progress=None, cancel=None):
             path = Path(directory)/f"profile-{index}.flowmesh"
             mesh.save(path)
             one = replace(c, profile_angle=angle, mesh_path=str(path), profile_sweep=())
-            result = solve(one, (lambda i, n, t: progress(i, n, angle)) if progress else None, cancel)
+            result = solve(one, (lambda i, n, t: progress(i, n, angle if c.mode == "steady" else t)) if progress else None, cancel)
             aero = result.diagnostics["aerodynamics"]
             points.append(dict(angle=angle, **aero["final"], converged=result.diagnostics["converged"],
                                iterations=result.diagnostics["iterations"],
@@ -84,7 +84,7 @@ def solve_profile(config, progress=None, cancel=None):
                 base = result
     # Temporary meshing files are never required to reopen or plot the result.
     base.config = replace(base.config, mesh_path=None, profile_sweep=c.profile_sweep)
-    base.diagnostics["aerodynamics"]["polar"] = sorted(points, key=lambda p: p["angle"])
+    base.diagnostics["aerodynamics"]["polar"] = sorted(points, key=lambda p: p["angle"]) if c.mode == "steady" else []
     base.diagnostics["aerodynamics"]["polar_requested"] = bool(c.profile_sweep)
     return base
 
@@ -95,6 +95,8 @@ def export_csv(result, path, polar=False):
     columns = ["angle", "cl", "cd", "cl_cd", "converged", "iterations"] if polar else [
         "iteration", "cl", "cd", "cl_cd", "drag_n_per_m", "lift_n_per_m",
         "pressure_drag_n_per_m", "pressure_lift_n_per_m", "shear_drag_n_per_m", "shear_lift_n_per_m"]
+    if not polar and result.config.mode == "transient":
+        columns.insert(0, "time")
     with open(path, "w", newline="", encoding="utf-8-sig") as out:
         writer = csv.DictWriter(out, fieldnames=columns, extrasaction="ignore", lineterminator="\n")
         writer.writeheader()

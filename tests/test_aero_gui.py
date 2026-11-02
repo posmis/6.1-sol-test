@@ -17,7 +17,7 @@ def test_both_graphs_and_unconverged_polar_markers():
     polar = [dict(angle=-4., cl=-.2, cd=.1, cl_cd=-2., converged=True),
              dict(angle=0., cl=.1, cd=.2, cl_cd=.5, converged=False),
              dict(angle=4., cl=.4, cd=.1, cl_cd=4., converged=True)]
-    result = SimpleNamespace(diagnostics=dict(converged=True, aerodynamics=dict(
+    result = SimpleNamespace(config=SimpleNamespace(mode="steady"), diagnostics=dict(converged=True, aerodynamics=dict(
         angle_deg=4., reynolds_chord=100000., final=history[-1], history=history, polar=polar)))
     dialog = AeroDialog(result)
     dialog.show()
@@ -45,6 +45,10 @@ def test_ready_profile_desktop_path_and_graph_button():
     window.scenario.setCurrentIndex(PROFILE_INDEX)
     assert window.speed.value() == 20.
     assert window.ny.value() >= 128
+    assert window.mode.currentIndex() == 1
+    assert window.mode.isEnabled()
+    assert not window.profile_polar.isEnabled()
+    window.mode.setCurrentIndex(0)
     window.profile_cells.setValue(400)
     window.profile_polar.setChecked(False)
     window.iterations.setValue(10)

@@ -73,7 +73,7 @@ def test_profile_calculation_and_coefficient_roundtrip(tmp_path):
 
 
 def test_profile_input_limits_and_cancel():
-    for c in (Config(scenario=PROFILE_SCENARIO), Config(profile_angle=40), Config(profile_chord=0),
+    for c in (Config(scenario=PROFILE_SCENARIO, profile_sweep=(0.,)), Config(profile_angle=40), Config(profile_chord=0),
               Config(profile_cells=100), Config(profile_sweep=(float("nan"),))):
         with pytest.raises(ValueError):
             c.validate()

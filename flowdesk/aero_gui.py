@@ -16,7 +16,7 @@ class AeroDialog(QtWidgets.QDialog):
         ratio = "не определено" if last["cl_cd"] is None else f"{last['cl_cd']:.4f}"
         summary = QtWidgets.QLabel(f"α = {aero['angle_deg']:+.1f}° · Re(c) = {aero['reynolds_chord']:.0f} · "
             f"Cl = {last['cl']:.5f} · Cd = {last['cd']:.5f} · Cl/Cd = {ratio}\n"
-            + ("Решение сошлось." if d["converged"] else "НЕ СОШЛОСЬ: коэффициенты пока не являются установившимся результатом."))
+            + ("Нестационарный расчёт: коэффициенты показаны во времени." if result.config.mode == "transient" else "Решение сошлось." if d["converged"] else "НЕ СОШЛОСЬ: коэффициенты пока не являются установившимся результатом."))
         summary.setWordWrap(True)
         layout.addWidget(summary)
         tabs = QtWidgets.QTabWidget()
@@ -27,9 +27,9 @@ class AeroDialog(QtWidgets.QDialog):
             plot = history.addPlot(row=i, col=0)
             plot.setLabel("left", label)
             plot.getAxis("left").enableAutoSIPrefix(False)
-            plot.setLabel("bottom", "Итерация SIMPLE")
+            plot.setLabel("bottom", "Время, с" if result.config.mode == "transient" else "Итерация SIMPLE")
             plot.showGrid(x=True, y=True, alpha=.2)
-            plot.plot([p["iteration"] for p in aero["history"]],
+            plot.plot([p["time" if result.config.mode == "transient" else "iteration"] for p in aero["history"]],
                       [np.nan if p[key] is None else p[key] for p in aero["history"]], pen=color)
             self.history_plots.append(plot)
         tabs.addTab(history, "История Cl, Cd и Cl/Cd")
@@ -55,7 +55,7 @@ class AeroDialog(QtWidgets.QDialog):
                 self.polar_plots.append(plot)
             polar_layout.addWidget(graphics, 1)
         else:
-            note = QtWidgets.QLabel("Серия углов не рассчитана. Включите «Поляра по углу атаки» в параметрах профиля и запустите расчёт.")
+            note = QtWidgets.QLabel("Серия углов не рассчитана. Выберите стационарный режим, включите «Поляра по углу атаки» в параметрах профиля и запустите расчёт.")
             note.setWordWrap(True)
             polar_layout.addWidget(note)
         table = QtWidgets.QTableWidget(len(polar), 5)

@@ -9,7 +9,7 @@ import numpy as np
 from PySide6 import QtCore, QtWidgets
 import pyqtgraph as pg
 from .solver import Config, Result, Solver
-from .visualization import streamlines
+from .visualization import streamlines, Tracers
 from .scenarios import SCENARIOS, PROFILE_SCENARIO, PROFILE_LABEL
 
 PROFILE_INDEX = len(SCENARIOS)
@@ -43,6 +43,7 @@ class Window(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("FlowDesk · 2D RANS / k–ε")
         self.resize(1240, 780)
+        self.tracers = None
         self.result = None
         self.process = None
         self.custom_mesh_path = None
@@ -78,7 +79,8 @@ class Window(QtWidgets.QMainWindow):
         self.scenario = QtWidgets.QComboBox()
         self.scenario.addItems(list(SCENARIOS.values())+[PROFILE_LABEL, "Своя модель (DXF / .flowmesh)"])
         self.mode = QtWidgets.QComboBox()
-        self.mode.addItems(["Стационарный · SIMPLE", "Нестационарный"])
+        self.mode.addItems(["Стационарный · SIMPLE", "Нестационарный · анимация полей"])
+        self.mode.setCurrentIndex(1)
         self.iterations = QtWidgets.QSpinBox()
         self.iterations.setRange(10, 10000)
         self.iterations.setValue(1000)
@@ -112,7 +114,13 @@ class Window(QtWidgets.QMainWindow):
         self.polar_min = self.number(-30, 30, -4., " °", 1)
         self.polar_max = self.number(-30, 30, 8., " °", 1)
         self.polar_step = self.number(.5, 30, 4., " °", 1)
-        self.duration = self.number(.2, 10, 1.2, " с")
+        self.duration = self.number(.0001, 100, 1.2, " с", 4)
+        self.initial_condition = QtWidgets.QComboBox()
+        self.initial_condition.addItems(["Движущийся поток вокруг тела", "Пуск из покоя"])
+        self.initial_condition.setToolTip("Для своей сетки и профиля. Движущийся поток предварительно проецируется на непроницаемые стенки; затем рассчитывается развитие следа.")
+        self.time_step = self.number(0, 10, 0., " с", 6)
+        self.time_step.setSpecialValueText("Авто")
+        self.time_step.setToolTip("Верхняя граница физического шага. Уменьшайте для проверки временной сходимости. 0 — автоматический выбор.")
         self.length = self.number(.1, 3, .6, " м")
         self.height = self.number(.01, .2, .04, " м", 3)
         form = QtWidgets.QFormLayout()
@@ -122,7 +130,7 @@ class Window(QtWidgets.QMainWindow):
                               ("Ячеек по X", self.nx), ("Ячеек по Y", self.ny),
                               ("Верхняя граница", self.top), ("Нижняя граница", self.bottom),
                               ("Кадров", self.frames),
-                              ("Скорость входа", self.speed), ("Время расчёта", self.duration),
+                              ("Скорость входа", self.speed), ("Время расчёта", self.duration), ("Макс. шаг времени", self.time_step), ("Начальное состояние", self.initial_condition),
                               ("Длина", self.length), ("Высота области", self.height)):
             form.addRow(label, widget)
         left.addLayout(form)
@@ -147,7 +155,7 @@ class Window(QtWidgets.QMainWindow):
         self.update_memory()
         self.settings = [control for _, control in self.profile_controls]+[mesh_editor_button, mesh_load_button, self.scenario, self.mode, self.iterations, self.tolerance, self.coarse,
                          self.grid, self.nx, self.ny, self.top, self.bottom,
-                         self.frames, self.speed, self.duration, self.length, self.height]
+                         self.frames, self.speed, self.duration, self.time_step, self.initial_condition, self.length, self.height]
         self.run_button = QtWidgets.QPushButton("Рассчитать кадры")
         self.run_button.clicked.connect(self.start)
         self.cancel_button = QtWidgets.QPushButton("Отменить расчёт")
@@ -202,6 +210,7 @@ class Window(QtWidgets.QMainWindow):
         equal_scale.toggled.connect(lambda checked: self.plot.setAspectLocked(checked))
         self.rate = QtWidgets.QComboBox()
         self.rate.addItems(["0.25×", "0.5×", "1×", "2×"])
+        self.rate.setToolTip("Скорость просмотра: при 1× весь нестационарный расчёт проигрывается за 8 секунд. Физическое время показано под полем.")
         self.rate.setCurrentIndex(2)
         toolbar.addWidget(self.field)
         toolbar.addWidget(self.show_lines)
@@ -230,6 +239,8 @@ class Window(QtWidgets.QMainWindow):
         self.plot.addItem(self.line)
         self.particles = pg.ScatterPlotItem(size=4, pen=None, brush="#f8fafc")
         self.plot.addItem(self.particles)
+        self.trails = pg.PlotCurveItem(pen=pg.mkPen((170, 235, 255, 110), width=1.3), connect="finite")
+        self.plot.addItem(self.trails)
         self.boundaries = [pg.PlotCurveItem(), pg.PlotCurveItem()]
         for line in self.boundaries:
             self.plot.addItem(line)
@@ -287,7 +298,7 @@ class Window(QtWidgets.QMainWindow):
             if not self.custom_mesh_path:
                 return
         angles = ()
-        if profile and self.profile_polar.isChecked():
+        if profile and self.mode.currentIndex() == 0 and self.profile_polar.isChecked():
             if self.polar_min.value() > self.polar_max.value():
                 QtWidgets.QMessageBox.warning(self, "Углы поляры", "Начальный угол должен быть не больше конечного")
                 return
@@ -303,7 +314,8 @@ class Window(QtWidgets.QMainWindow):
                    nx=self.nx.value(), ny=self.ny.value(), frames=self.frames.value(),
                    top=["wall", "open"][self.top.currentIndex()],
                    bottom=["wall", "open"][self.bottom.currentIndex()],
-                   speed=self.speed.value(), duration=self.duration.value(),
+                   speed=self.speed.value(), duration=self.duration.value(), time_step=self.time_step.value(),
+                   initial_condition="rest" if (custom or profile) and self.initial_condition.currentIndex() == 1 else "uniform",
                    length=self.length.value(), height=self.height.value(),
                    rho=1.225 if profile else 998.2, nu=1.5e-5 if profile else 1.004e-6,
                    intensity=.01 if profile else .05,
@@ -326,11 +338,9 @@ class Window(QtWidgets.QMainWindow):
     def mode_changed(self, *_):
         custom = self.scenario.currentIndex() == CUSTOM_INDEX
         profile = self.scenario.currentIndex() == PROFILE_INDEX
-        if (custom or profile) and self.mode.currentIndex() != 0:
-            self.mode.setCurrentIndex(0)
         steady = self.mode.currentIndex() == 0
         enabled = self.process is None
-        self.mode.setEnabled(enabled and not custom and not profile)
+        self.mode.setEnabled(enabled)
         for control in (self.grid, self.nx, self.ny, self.length, self.height, self.top, self.bottom):
             control.setEnabled(enabled and not custom and not profile)
         for label, control in self.profile_controls:
@@ -338,11 +348,14 @@ class Window(QtWidgets.QMainWindow):
             control.setVisible(profile)
             control.setEnabled(enabled and profile)
         for control in (self.polar_min, self.polar_max, self.polar_step):
-            control.setEnabled(enabled and profile and self.profile_polar.isChecked())
+            control.setEnabled(enabled and profile and steady and self.profile_polar.isChecked())
+        self.profile_polar.setEnabled(enabled and profile and steady)
         self.coarse.setEnabled(enabled and steady and not custom and not profile)
         if profile:
             if self.last_scenario != PROFILE_INDEX:
                 self.speed.setValue(20.)
+                if not steady:
+                    self.duration.setValue(.025)
                 self.set_mesh(320, 160)
             for control, value in ((self.length, 8*self.profile_chord.value()),
                                    (self.height, 4*self.profile_chord.value())):
@@ -356,9 +369,12 @@ class Window(QtWidgets.QMainWindow):
         self.last_scenario = self.scenario.currentIndex()
         self.run_button.setText("Рассчитать SIMPLE" if steady else "Рассчитать кадры")
         self.duration_caption.setText("Цикл анимации" if steady else "Время расчёта")
+        self.initial_condition.setEnabled(enabled and not steady and (custom or profile))
+        self.time_step.setEnabled(enabled and not steady)
         self.frames.setEnabled(enabled and not steady)
+        self.iterations.setToolTip("Лимит итераций SIMPLE на каждый физический шаг" if not steady and (custom or profile) else "Лимит итераций стационарного SIMPLE")
         for control in (self.iterations, self.tolerance):
-            control.setEnabled(enabled and steady)
+            control.setEnabled(enabled and (steady or custom or profile))
         self.duration.setToolTip("В SIMPLE это длительность воспроизведения, не физического расчёта" if steady else "Длительность физического расчёта")
         self.update_memory()
 
@@ -446,7 +462,7 @@ class Window(QtWidgets.QMainWindow):
                     if kind == "progress":
                         i, n, t = value
                         self.progress.setValue(round(i/n*100))
-                        self.info.setText(f"Профиль α={t:+.1f}° · итерация {i}/{n}" if self.calculation_scenario == PROFILE_SCENARIO else f"SIMPLE · {'грубая сетка · ' if t < 0 else ''}итерация {i}/{n}" if self.calculation_mode == "steady"
+                        self.info.setText(f"Профиль α={t:+.1f}° · итерация {i}/{n}" if self.calculation_scenario == PROFILE_SCENARIO and self.calculation_mode == "steady" else f"SIMPLE · {'грубая сетка · ' if t < 0 else ''}итерация {i}/{n}" if self.calculation_mode == "steady"
                                           else f"Кадр {i}/{n} · t = {t:.3f} с")
                     else:
                         self.finish_worker()
@@ -467,12 +483,15 @@ class Window(QtWidgets.QMainWindow):
                     self.info.setText(f"Процесс завершился без результата (код {code}).")
         if self.playing and self.result is not None:
             speed = [.25, .5, 1, 2][self.rate.currentIndex()]
-            self.position = (self.position+elapsed*speed) % self.result.config.duration
+            self.position = (self.position+elapsed*speed*(self.result.config.duration/8 if self.result.config.mode == "transient" else 1.)) % self.result.config.duration
             self.render()
         elif self.show_lines.isChecked() and self.stream_future is not None and self.stream_future[2].done():
             self.render()
 
     def accept_result(self, result):
+        self.tracers = Tracers(result) if result.config.mode == "transient" else None
+        self.trails.setData([], [])
+        self.caption.setText("Поля скорости и давления меняются во времени. Линии — мгновенные линии тока; частицы движутся по рассчитанной скорости." if self.tracers else "Стационарное поле. Маркеры показывают направление; физическое время не рассчитывается.")
         self.result = result
         self.position = 0.
         self.stream_key = None
@@ -495,6 +514,7 @@ class Window(QtWidgets.QMainWindow):
             + ("Обратный поток на выходе: увеличьте длину канала.\n" if d['backflow'] else "")
             + "Сходимость и точность см. в отчёте проверки.")
         c = result.config
+        self.initial_condition.setCurrentIndex(0 if c.initial_condition == "uniform" else 1)
         self.mode.setCurrentIndex(0 if c.mode == "steady" else 1)
         self.iterations.setValue(c.max_iterations)
         self.tolerance.setValue(c.tolerance)
@@ -531,7 +551,7 @@ class Window(QtWidgets.QMainWindow):
         self.top.setCurrentIndex(0 if c.top == "wall" else 1)
         self.bottom.setCurrentIndex(0 if c.bottom == "wall" else 1)
         self.frames.setValue(c.frames)
-        for control, value in ((self.speed, c.speed), (self.duration, c.duration),
+        for control, value in ((self.speed, c.speed), (self.duration, c.duration), (self.time_step, c.time_step),
                                (self.length, c.length), (self.height, c.height)):
             control.setValue(value)
         self.set_mesh(c.nx, c.ny)
@@ -565,6 +585,10 @@ class Window(QtWidgets.QMainWindow):
         values = np.hypot(r.u, r.v) if self.field.currentIndex() == 0 else r.pressure
         values = values[:, r.fluid]
         low, high = float(values.min()), float(values.max())
+        if self.field.currentIndex() == 1:
+            bound = max(abs(low), abs(high), 1e-6)
+            low, high = -bound, bound
+        self.bar.setColorMap(pg.colormap.get("CET-D1" if self.field.currentIndex() == 1 else "viridis"))
         self.bar.setLevels((low, max(high, low+1e-6)))
         self.render()
 
@@ -583,8 +607,9 @@ class Window(QtWidgets.QMainWindow):
         self.time_label.setText(f"{'Анимация' if r.config.mode == 'steady' else 't'} = {t:.3f} с")
         self.line.setVisible(self.show_lines.isChecked())
         self.particles.setVisible(self.show_lines.isChecked())
+        self.trails.setVisible(self.show_lines.isChecked() and self.tracers is not None)
         if self.show_lines.isChecked():
-            key = int(t*8)  # integrate only eight frozen fields per simulated second
+            key = int(t/r.config.duration*80)  # integrate only eight frozen fields per simulated second
             if self.stream_future is not None and self.stream_future[2].done():
                 owner, sampled_key, future = self.stream_future
                 self.stream_future = None
@@ -597,14 +622,15 @@ class Window(QtWidgets.QMainWindow):
                 # Integration never blocks the playback timer; one pending field at most.
                 self.stream_future = (id(r), key, self.stream_pool.submit(
                     streamlines, u.copy(), v.copy(), r.fluid, r.config.length, r.config.height))
-            # Markers illustrate flow direction; they are not physical tracers.
-            ds = max(.45*min(r.config.length/r.config.nx, r.config.height/r.config.ny), r.config.length/1800)
-            dots = [p[int((t*.35*r.config.speed/ds+i*31) % len(p))] for i, p in enumerate(self.paths)]
-            if dots:
-                dots = np.array(dots)
+            if self.tracers is not None:
+                dots, trails = self.tracers.advance(t)
                 self.particles.setData(dots[:, 0], dots[:, 1])
+                self.trails.setData(trails[:, 0], trails[:, 1])
             else:
-                self.particles.setData([], [])
+                # Direction markers are used only for explicitly stationary results.
+                ds = max(.45*min(r.config.length/r.config.nx, r.config.height/r.config.ny), r.config.length/1800)
+                dots = np.array([p[int((t*.35*r.config.speed/ds+i*31) % len(p))] for i, p in enumerate(self.paths)])
+                self.particles.setData(dots[:, 0], dots[:, 1]) if len(dots) else self.particles.setData([], [])
 
     def toggle(self):
         self.playing = not self.playing

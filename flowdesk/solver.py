@@ -24,6 +24,8 @@ class Config:
     rho: float = 998.2
     nu: float = 1.004e-6
     duration: float = 1.2
+    initial_condition: str = "uniform"
+    time_step: float = 0.  # zero: automatic; otherwise an upper bound in seconds
     frames: int = 80
     intensity: float = 0.05
     top: str = "wall"
@@ -51,16 +53,16 @@ class Config:
     def validate(self):
         if self.scenario not in SCENARIOS and self.scenario not in ("custom", PROFILE_SCENARIO):
             raise ValueError("Unknown scenario")
-        if self.scenario == PROFILE_SCENARIO and self.mode != "steady":
-            raise ValueError("Продувка профиля использует стационарный SIMPLE")
+        if self.mode == "transient" and self.profile_sweep:
+            raise ValueError("Поляра по углам доступна в стационарном режиме; нестационарный расчёт — один угол")
         if (not np.isfinite(self.profile_angle) or not -30 <= self.profile_angle <= 30
             or not np.isfinite(self.profile_chord) or not .001 <= self.profile_chord <= 10
             or not isinstance(self.profile_cells, int) or not 400 <= self.profile_cells <= 30000
             or len(self.profile_sweep) > 21
             or any(not np.isfinite(a) or not -30 <= a <= 30 for a in self.profile_sweep)):
             raise ValueError("Некорректные параметры профиля: угол ±30°, хорда 0.001…10 м, сетка 400…30000")
-        if self.scenario == "custom" and (not self.mesh_path or self.mode != "steady"):
-            raise ValueError("Для своей сетки нужен файл .flowmesh и стационарный SIMPLE")
+        if self.scenario == "custom" and not self.mesh_path:
+            raise ValueError("Для своей сетки нужен файл .flowmesh")
         if not (isinstance(self.nx, int) and isinstance(self.ny, int)
                 and 16 <= self.nx <= 1024 and 8 <= self.ny <= 1024):
             raise ValueError("Grid must be 16..1024 × 8..1024")
@@ -70,6 +72,12 @@ class Config:
             raise ValueError("Invalid solution mode or iteration limit")
         if not np.isfinite(self.tolerance) or not 1e-8 <= self.tolerance <= 1e-2:
             raise ValueError("Tolerance must be between 1e-8 and 1e-2")
+        if self.scenario in SCENARIOS and self.initial_condition == "rest":
+            raise ValueError("Пуск из покоя доступен для профиля и своей сетки")
+        if self.initial_condition not in ("rest", "uniform"):
+            raise ValueError("Начальное состояние: rest или uniform")
+        if not np.isfinite(self.time_step) or self.time_step < 0:
+            raise ValueError("Шаг времени должен быть неотрицательным (0 — авто)")
         for name in ("length", "height", "speed", "rho", "nu", "duration"):
             if not np.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be finite and positive")
@@ -293,7 +301,7 @@ class Solver:
             while t < target-1e-12:
                 if cancel is not None and cancel.is_set():
                     raise InterruptedError("Calculation cancelled")
-                t += self.step(target-t)
+                t += self.step(min(target-t, self.c.time_step) if self.c.time_step else target-t)
                 steps += 1
                 maxdiv = max(maxdiv, float(np.max(abs(self.divergence()[self.fluid]))))
             uc, vc = self.centres()
