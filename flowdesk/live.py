@@ -17,6 +17,8 @@ class PreviewFrame:
     fluid: np.ndarray
     temperature: np.ndarray | None = None
     boundaries: dict | None = None
+    mach: np.ndarray | None = None
+    density: np.ndarray | None = None
 
 
 class PreviewMailbox:
@@ -81,12 +83,13 @@ class PreviewEmitter:
         if not force and now-self.last < self.interval:
             return
         self.last = now
-        u, v, pressure, temperature = values()
+        u, v, pressure, temperature, *gas = values()
         def sample(q):
             return np.where(self.fluid, np.asarray(q)[self.indices], 0.).astype(np.float32)
         self.callback(PreviewFrame(self.config, int(iteration), float(physical_time), phase,
             sample(u), sample(v), sample(pressure), self.fluid,
-            None if temperature is None else sample(temperature), self.boundaries))
+            None if temperature is None else sample(temperature), self.boundaries,
+            mach=sample(gas[0]) if gas else None, density=sample(gas[1]) if gas else None))
 
 
 def structured_values(solver):

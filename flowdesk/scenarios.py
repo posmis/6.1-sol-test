@@ -1,6 +1,9 @@
 """Built-in geometries. Obstacles are closed solids, including at open outer edges."""
 import numpy as np
 
+NOZZLE_SCENARIO = "de_laval"
+NOZZLE_LABEL = "Сопло Лаваля"
+
 PROFILE_SCENARIO = "elliptic_profile"
 PROFILE_LABEL = "Продувка · несимметричный эллиптический профиль"
 
@@ -31,4 +34,8 @@ def geometry(config):
     elif config.scenario == "baffles":
         solid = (((x > .28) & (x < .34) & (y < .65)) |
                  ((x > .60) & (x < .66) & (y > .35)))
+    elif config.scenario == NOZZLE_SCENARIO:
+        from .nozzle import height_at
+        half_height = height_at(config, x*config.length)/2
+        solid = abs((y-.5)*config.height) > half_height
     return ~solid

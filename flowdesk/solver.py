@@ -8,7 +8,7 @@ from dataclasses import dataclass, asdict
 import json
 import numpy as np
 from threadpoolctl import threadpool_limits
-from .scenarios import SCENARIOS, PROFILE_SCENARIO, geometry
+from .scenarios import SCENARIOS, PROFILE_SCENARIO, NOZZLE_SCENARIO, geometry
 from .pressure import PressureSolver
 from .kernels import diffuse as diffusion, advect as upwind, scalar_transport
 
@@ -49,9 +49,24 @@ class Config:
     profile_chord: float = .1
     profile_cells: int = 800
     profile_sweep: tuple = ()
+    nozzle_model: str = "gas"
+    nozzle_inlet_height: float = .04
+    nozzle_throat_height: float = .016
+    nozzle_exit_height: float = .032
+    nozzle_converging_length: float = .08
+    nozzle_diverging_length: float = .12
+    nozzle_total_pressure: float = 300000.
+    nozzle_total_temperature: float = 300.
+    nozzle_back_pressure: float = 30000.
+    nozzle_gamma: float = 1.4
+    nozzle_gas_constant: float = 287.05
 
     def __post_init__(self):
         object.__setattr__(self, "profile_sweep", tuple(self.profile_sweep))
+
+    @property
+    def is_compressible(self):
+        return self.scenario == NOZZLE_SCENARIO and self.nozzle_model == "gas"
 
     @property
     def thermal_diffusivity(self):
@@ -59,7 +74,7 @@ class Config:
 
     @property
     def field_count(self):
-        return 5+int(self.energy)
+        return 5+int(self.energy or self.is_compressible)+2*int(self.is_compressible)
 
     @property
     def frame_count(self):
@@ -69,6 +84,21 @@ class Config:
         return min(self.frames, max(2, (256*1024**2)//(self.nx*self.ny*self.field_count*4)))
 
     def validate(self):
+        if self.scenario == NOZZLE_SCENARIO:
+            if self.nozzle_model not in ("gas", "liquid"):
+                raise ValueError("Модель сопла: gas или liquid")
+            names = ("nozzle_inlet_height", "nozzle_throat_height", "nozzle_exit_height",
+                     "nozzle_converging_length", "nozzle_diverging_length")
+            if self.nozzle_model == "gas":
+                names += ("nozzle_total_pressure", "nozzle_total_temperature", "nozzle_back_pressure", "nozzle_gas_constant")
+            for name in names:
+                if not np.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
+                    raise ValueError(f"{name} must be finite and positive")
+            if self.nozzle_throat_height >= min(self.nozzle_inlet_height, self.nozzle_exit_height):
+                raise ValueError("Сопло: горловина должна быть уже входа и выхода")
+            if self.nozzle_model == "gas" and (not 1.01 <= self.nozzle_gamma <= 1.67
+                or self.nozzle_back_pressure >= self.nozzle_total_pressure):
+                raise ValueError("Газовое сопло: 1.01≤γ≤1.67 и 0<pвыход<p0")
         if not isinstance(self.turbulence, bool) or not isinstance(self.energy, bool):
             raise ValueError("Physics switches must be boolean")
         if self.thermal_wall not in ("adiabatic", "isothermal"):
@@ -79,7 +109,7 @@ class Config:
                      "temperature_inlet", "temperature_wall"):
             if not np.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be finite and positive (temperature in K)")
-        if self.scenario not in SCENARIOS and self.scenario not in ("custom", PROFILE_SCENARIO):
+        if self.scenario not in SCENARIOS and self.scenario not in ("custom", PROFILE_SCENARIO, NOZZLE_SCENARIO):
             raise ValueError("Unknown scenario")
         if self.mode == "transient" and self.profile_sweep:
             raise ValueError("Поляра по углам доступна в стационарном режиме; нестационарный расчёт — один угол")
@@ -96,7 +126,7 @@ class Config:
             raise ValueError("Grid must be 16..1024 × 8..1024")
         if self.top not in ("wall", "open") or self.bottom not in ("wall", "open"):
             raise ValueError("Top and bottom boundaries must be wall or open")
-        if self.mode not in ("transient", "steady") or not 10 <= self.max_iterations <= 10000:
+        if self.mode not in ("transient", "steady") or not 10 <= self.max_iterations <= (200000 if self.is_compressible else 10000):
             raise ValueError("Invalid solution mode or iteration limit")
         if not np.isfinite(self.tolerance) or not 1e-8 <= self.tolerance <= 1e-2:
             raise ValueError("Tolerance must be between 1e-8 and 1e-2")
@@ -126,11 +156,14 @@ class Result:
     diagnostics: dict
     native: dict | None = None
     temperature: np.ndarray | None = None
+    mach: np.ndarray | None = None
+    density: np.ndarray | None = None
 
     def save(self, path):
         extra = {"native_"+key: value for key, value in (self.native or {}).items()}
-        if self.temperature is not None:
-            extra["temperature"] = self.temperature
+        for key in ("temperature", "mach", "density"):
+            if getattr(self, key) is not None:
+                extra[key] = getattr(self, key)
         np.savez_compressed(path, config=json.dumps(asdict(self.config)),
                             diagnostics=json.dumps(self.diagnostics), time=self.time,
                             u=self.u, v=self.v, pressure=self.pressure, k=self.k,
@@ -141,7 +174,7 @@ class Result:
             raise ValueError("В результате нет неструктурированной сетки")
         import meshio
         native = self.native
-        cells, data = [], {key: [] for key in ("u", "v", "pressure", "k", "epsilon", "temperature") if key in native}
+        cells, data = [], {key: [] for key in ("u", "v", "pressure", "k", "epsilon", "temperature", "mach", "density", "pressure_absolute", "total_energy") if key in native}
         for count, kind in ((3, "triangle"), (4, "quad")):
             mask = np.sum(native["cells"] >= 0, axis=1) == count
             if mask.any():
@@ -172,15 +205,25 @@ class Result:
             if cfg.energy != (temperature is not None) or (temperature is not None and (
                 temperature.shape != shape or not np.isfinite(temperature).all())):
                 raise ValueError("Missing or invalid temperature field")
+            gas_fields = {}
+            for key in ("mach", "density"):
+                value = z[key].copy() if key in z.files else None
+                if cfg.is_compressible != (value is not None) or (value is not None and (
+                    value.shape != shape or not np.isfinite(value).all())):
+                    raise ValueError(f"Missing or invalid {key} field")
+                gas_fields[key] = value
             native = {key[7:]: z[key].copy() for key in z.files if key.startswith("native_")}
-            return cls(cfg, **arrays, diagnostics=json.loads(str(z["diagnostics"])), native=native or None, temperature=temperature)
+            return cls(cfg, **arrays, diagnostics=json.loads(str(z["diagnostics"])), native=native or None, temperature=temperature, **gas_fields)
 
 
 class Solver:
     def __init__(self, config=Config()):
         config.validate()
+        if config.scenario == NOZZLE_SCENARIO:
+            from .nozzle import normalize
+            config = normalize(config)
         self.c = c = config
-        if c.scenario in ("custom", PROFILE_SCENARIO):
+        if c.scenario in ("custom", PROFILE_SCENARIO) or c.is_compressible:
             return
         self.dx, self.dy = c.length/c.nx, c.height/c.ny
         self.fluid = geometry(c)
@@ -328,6 +371,9 @@ class Solver:
 
     @threadpool_limits.wrap(limits=1, user_api="blas")
     def run(self, progress=None, cancel=None, preview=None):
+        if self.c.is_compressible:
+            from .nozzle import solve
+            return solve(self.c, progress, cancel, preview=preview)
         if self.c.scenario == PROFILE_SCENARIO:
             from .airfoil import solve_profile
             return solve_profile(self.c, progress, cancel, preview=preview)

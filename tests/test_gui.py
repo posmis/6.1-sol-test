@@ -16,7 +16,7 @@ def test_desktop_calculate_play_save_load(tmp_path):
     window = Window()
     window.show()
     window.mode.setCurrentIndex(1)
-    assert window.scenario.count() == 8
+    assert window.scenario.count() == 9
     window.grid.setCurrentIndex(6)
     assert window.nx.value() == window.ny.value() == 1024
     assert "12 кадров" in window.memory.text()

@@ -11,10 +11,11 @@ import pyqtgraph as pg
 from .solver import Config, Result, Solver
 from .live import PreviewMailbox
 from .visualization import streamlines, Tracers
-from .scenarios import SCENARIOS, PROFILE_SCENARIO, PROFILE_LABEL
+from .scenarios import SCENARIOS, PROFILE_SCENARIO, PROFILE_LABEL, NOZZLE_SCENARIO, NOZZLE_LABEL
 
 PROFILE_INDEX = len(SCENARIOS)
-CUSTOM_INDEX = len(SCENARIOS)+1
+NOZZLE_INDEX = len(SCENARIOS)+1
+CUSTOM_INDEX = len(SCENARIOS)+2
 
 GRID_PRESETS = [(64, 16), (96, 24), (144, 36), (256, 64), (512, 128),
                 (1024, 256), (1024, 1024)]
@@ -83,7 +84,7 @@ class Window(QtWidgets.QMainWindow):
         self.mesh_info.setWordWrap(True)
         left.addWidget(self.mesh_info)
         self.scenario = QtWidgets.QComboBox()
-        self.scenario.addItems(list(SCENARIOS.values())+[PROFILE_LABEL, "Своя модель (DXF / .flowmesh)"])
+        self.scenario.addItems(list(SCENARIOS.values())+[PROFILE_LABEL, NOZZLE_LABEL, "Своя модель (DXF / .flowmesh)"])
         self.mode = QtWidgets.QComboBox()
         self.mode.addItems(["Стационарный · SIMPLE", "Нестационарный · анимация полей"])
         self.mode.setCurrentIndex(1)
@@ -171,6 +172,40 @@ class Window(QtWidgets.QMainWindow):
             ("Начальный α", self.polar_min), ("Конечный α", self.polar_max), ("Шаг α", self.polar_step)):
             form.addRow(label, control)
             self.profile_controls.append((form.labelForField(control), control))
+        self.nozzle_model = QtWidgets.QComboBox()
+        self.nozzle_model.addItems(["Газ · сжимаемый 2D", "Жидкость · несжимаемая"])
+        self.nozzle_regime = QtWidgets.QComboBox()
+        self.nozzle_regime.addItems(["Сверхзвуковой выход", "Скачок внутри сопла", "Дозвуковой", "Свои настройки"])
+        self.nozzle_controls = []
+        self.nozzle_group = QtWidgets.QGroupBox("Сопло Лаваля · настройки")
+        nozzle_form = QtWidgets.QFormLayout(self.nozzle_group)
+        form.insertRow(4, self.nozzle_group)
+        defaults = Config()
+        nozzle_items = [("Модель сопла", self.nozzle_model), ("Заготовка режима", self.nozzle_regime)]
+        labels = (("nozzle_inlet_height", "Высота входа"), ("nozzle_throat_height", "Высота горловины"),
+            ("nozzle_exit_height", "Высота выхода"), ("nozzle_converging_length", "Длина сужения"),
+            ("nozzle_diverging_length", "Длина расширения"), ("nozzle_total_pressure", "Полное p0, абс."),
+            ("nozzle_total_temperature", "Полная T0"), ("nozzle_back_pressure", "Противодавление"),
+            ("nozzle_gamma", "Показатель γ"), ("nozzle_gas_constant", "Газовая R"))
+        self.nozzle_parameters = []
+        for name, label in labels:
+            value = getattr(defaults, name)
+            if name.endswith('height') or name.endswith('length'):
+                widget = self.number(.0001, 10., value, " м", 4)
+            elif 'pressure' in name:
+                widget = self.number(100., 1e8, value, " Па", 0)
+            elif 'temperature' in name:
+                widget = self.number(100., 4000., value, " K", 1)
+            elif name == 'nozzle_gamma':
+                widget = self.number(1.01, 1.67, value, "", 3)
+            else:
+                widget = self.number(20., 1000., value, " Дж/(кг·К)", 2)
+            setattr(self, name, widget)
+            self.nozzle_parameters.append(name)
+            nozzle_items.append((label, widget))
+        for label, widget in nozzle_items:
+            nozzle_form.addRow(label, widget)
+            self.nozzle_controls.append((nozzle_form.labelForField(widget), widget))
         self.duration_caption = form.labelForField(self.duration)
         self.memory = QtWidgets.QLabel()
         self.memory.setWordWrap(True)
@@ -179,6 +214,10 @@ class Window(QtWidgets.QMainWindow):
         self.nx.valueChanged.connect(self.mesh_changed)
         self.ny.valueChanged.connect(self.mesh_changed)
         self.frames.valueChanged.connect(self.update_memory)
+        self.nozzle_model.currentIndexChanged.connect(self.mode_changed)
+        self.nozzle_regime.currentIndexChanged.connect(self.apply_nozzle_regime)
+        for name in self.nozzle_parameters:
+            getattr(self, name).valueChanged.connect(self.mode_changed)
         self.energy.toggled.connect(self.mode_changed)
         self.turbulence.toggled.connect(self.mode_changed)
         self.thermal_wall.currentIndexChanged.connect(self.mode_changed)
@@ -187,7 +226,7 @@ class Window(QtWidgets.QMainWindow):
         self.profile_polar.toggled.connect(self.mode_changed)
         self.profile_chord.valueChanged.connect(self.mode_changed)
         self.update_memory()
-        self.settings = [control for _, control in self.profile_controls+self.thermal_controls]+[self.turbulence, self.energy, mesh_editor_button, mesh_load_button, self.scenario, self.mode, self.iterations, self.tolerance, self.coarse,
+        self.settings = [control for _, control in self.profile_controls+self.thermal_controls+self.nozzle_controls]+[self.turbulence, self.energy, mesh_editor_button, mesh_load_button, self.scenario, self.mode, self.iterations, self.tolerance, self.coarse,
                          self.grid, self.nx, self.ny, self.top, self.bottom,
                          self.frames, self.speed, self.duration, self.time_step, self.initial_condition, self.length, self.height]
         self.run_button = QtWidgets.QPushButton("Рассчитать кадры")
@@ -202,7 +241,7 @@ class Window(QtWidgets.QMainWindow):
         self.info = QtWidgets.QLabel("Выберите сценарий и выполните расчёт.\n\nРазмеры и поля — в системе СИ.")
         self.info.setWordWrap(True)
         left.addWidget(self.info)
-        note = QtWidgets.QLabel("Несжимаемые Навье–Стокс; k–ε и энергия включаются отдельно.\nЦель ±10% проверена только для стандартного канала со стенками. Новые геометрии и открытые границы требуют отдельного эталона.")
+        note = QtWidgets.QLabel("Навье–Стокс, k–ε и теплообмен; газовое сопло — 2D Эйлер.\nЦель ±10% проверена только для стандартного канала со стенками. Новые геометрии и открытые границы требуют отдельного эталона.")
         note.setWordWrap(True)
         note.setStyleSheet("color: #9aaec3; font-size: 12px")
         left.addWidget(note)
@@ -235,8 +274,9 @@ class Window(QtWidgets.QMainWindow):
         right = QtWidgets.QVBoxLayout()
         toolbar = QtWidgets.QHBoxLayout()
         self.field = QtWidgets.QComboBox()
-        self.field.addItems(["Скорость · м/с", "Давление · Па", "Температура · K"])
-        self.field.model().item(2).setEnabled(False)
+        self.field.addItems(["Скорость · м/с", "Давление · Па", "Температура · K", "Число Маха · M", "Плотность · кг/м³"])
+        for index in (2, 3, 4):
+            self.field.model().item(index).setEnabled(False)
         self.field.currentIndexChanged.connect(self.change_field)
         self.show_lines = QtWidgets.QCheckBox("Линии тока")
         self.show_lines.setChecked(True)
@@ -329,6 +369,8 @@ class Window(QtWidgets.QMainWindow):
             return
         custom = self.scenario.currentIndex() == CUSTOM_INDEX
         profile = self.scenario.currentIndex() == PROFILE_INDEX
+        nozzle = self.scenario.currentIndex() == NOZZLE_INDEX
+        gas = nozzle and self.nozzle_model.currentIndex() == 0
         if custom and not self.custom_mesh_path:
             self.load_mesh()
             if not self.custom_mesh_path:
@@ -342,7 +384,7 @@ class Window(QtWidgets.QMainWindow):
             if len(angles) > 21:
                 QtWidgets.QMessageBox.warning(self, "Углы поляры", "Максимум 21 угол. Увеличьте шаг.")
                 return
-        c = Config(scenario="custom" if custom else PROFILE_SCENARIO if profile else list(SCENARIOS)[self.scenario.currentIndex()],
+        c = Config(scenario="custom" if custom else PROFILE_SCENARIO if profile else NOZZLE_SCENARIO if nozzle else list(SCENARIOS)[self.scenario.currentIndex()],
                    mesh_path=self.custom_mesh_path if custom else None,
                    mode="steady" if self.mode.currentIndex() == 0 else "transient",
                    turbulence=self.turbulence.isChecked(), energy=self.energy.isChecked(),
@@ -362,7 +404,9 @@ class Window(QtWidgets.QMainWindow):
                    rho=1.225 if profile else 998.2, nu=1.5e-5 if profile else 1.004e-6,
                    intensity=.01 if profile else .05,
                    profile_angle=self.profile_angle.value(), profile_chord=self.profile_chord.value(),
-                   profile_cells=self.profile_cells.value(), profile_sweep=angles)
+                   profile_cells=self.profile_cells.value(), profile_sweep=angles,
+                   nozzle_model="gas" if self.nozzle_model.currentIndex() == 0 else "liquid",
+                   **{name: getattr(self, name).value() for name in self.nozzle_parameters})
         self.playing = False
         self.play.setText("▶ Воспроизвести")
         self.preview = None
@@ -386,6 +430,7 @@ class Window(QtWidgets.QMainWindow):
             line.setVisible(False)
         self.caption.setText("Идёт расчёт: ожидается первое промежуточное поле…")
         self.messages = self.context.Queue()
+        self.calculation_is_gas = c.is_compressible
         self.calculation_mode = c.mode
         self.calculation_scenario = c.scenario
         self.cancel_event = self.context.Event()
@@ -395,23 +440,62 @@ class Window(QtWidgets.QMainWindow):
             widget.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self.progress.setValue(0)
-        self.info.setText(("Расчёт RANS / k–ε" if c.turbulence else "Расчёт ламинарного течения")+(" + энергия" if c.energy else "")+"…\nПервый запуск компилирует численные ядра.\nИнтерфейс остаётся доступен.")
+        self.info.setText(("Расчёт сжимаемого газа · 2D Эйлер" if c.is_compressible else "Расчёт RANS / k–ε" if c.turbulence else "Расчёт ламинарного течения")+(" + энергия" if c.energy else "")+"…\nПервый запуск компилирует численные ядра.\nИнтерфейс остаётся доступен.")
 
     def mode_changed(self, *_):
         custom = self.scenario.currentIndex() == CUSTOM_INDEX
         profile = self.scenario.currentIndex() == PROFILE_INDEX
+        nozzle = self.scenario.currentIndex() == NOZZLE_INDEX
+        gas = nozzle and self.nozzle_model.currentIndex() == 0
         steady = self.mode.currentIndex() == 0
         enabled = self.process is None
+        if gas and not getattr(self, '_gas_active', False):
+            self._gas_active = True
+            self._before_gas = (self.turbulence.isChecked(), self.energy.isChecked())
+            self.turbulence.setChecked(False)
+            self.energy.setChecked(True)
+        elif not gas and getattr(self, '_gas_active', False):
+            self._gas_active = False
+            turbulence, energy = self._before_gas
+            self.turbulence.setChecked(turbulence)
+            self.energy.setChecked(energy)
+        self.turbulence.setEnabled(enabled and not gas)
+        self.energy.setEnabled(enabled and not gas)
+        self.speed.setEnabled(enabled and not gas)
+        self.mode.setItemText(0, "Стационарный · Эйлер" if gas else "Стационарный · SIMPLE")
+        self.iterations.setMaximum(200000 if gas else 10000)
+        self.nozzle_group.setVisible(nozzle)
+        for label, control in self.nozzle_controls:
+            is_gas_control = control is self.nozzle_regime or control in [getattr(self, name) for name in self.nozzle_parameters[5:]]
+            label.setVisible(nozzle and (gas or not is_gas_control))
+            control.setVisible(nozzle and (gas or not is_gas_control))
+            control.setEnabled(enabled and nozzle)
+        if nozzle:
+            self.initial_condition.setCurrentIndex(1 if gas else 0)
+            if self.last_scenario != NOZZLE_INDEX:
+                self._before_nozzle_dimensions = (self.length.value(), self.height.value())
+                if gas:
+                    self.duration.setValue(.003)
+                    self.iterations.setValue(12000)
+                    self.set_mesh(96, 24)
+            for control in (self.length, self.height):
+                control.setDecimals(4)
+                control.setRange(.0001, 20.)
+            self.length.setValue(self.nozzle_converging_length.value()+self.nozzle_diverging_length.value())
+            self.height.setValue(max(self.nozzle_inlet_height.value(), self.nozzle_exit_height.value()))
+        elif self.last_scenario == NOZZLE_INDEX and hasattr(self, '_before_nozzle_dimensions'):
+            self.length.setValue(self._before_nozzle_dimensions[0])
+            self.height.setValue(self._before_nozzle_dimensions[1])
         self.mode.setEnabled(enabled)
         for label, control in self.thermal_controls:
-            label.setVisible(self.energy.isChecked())
-            control.setVisible(self.energy.isChecked())
+            label.setVisible(self.energy.isChecked() and not gas)
+            control.setVisible(self.energy.isChecked() and not gas)
             control.setEnabled(enabled and self.energy.isChecked())
         self.temperature_wall.setEnabled(enabled and self.energy.isChecked() and self.thermal_wall.currentIndex() == 1)
         self.temperature_initial.setEnabled(enabled and self.energy.isChecked() and not steady)
         self.turbulent_prandtl.setEnabled(enabled and self.energy.isChecked() and self.turbulence.isChecked())
         for control in (self.grid, self.nx, self.ny, self.length, self.height, self.top, self.bottom):
-            control.setEnabled(enabled and not custom and not profile)
+            control.setEnabled(enabled and not custom and not profile and (not nozzle or control in (self.grid, self.nx, self.ny)))
         for label, control in self.profile_controls:
             label.setVisible(profile)
             control.setVisible(profile)
@@ -419,7 +503,7 @@ class Window(QtWidgets.QMainWindow):
         for control in (self.polar_min, self.polar_max, self.polar_step):
             control.setEnabled(enabled and profile and steady and self.profile_polar.isChecked())
         self.profile_polar.setEnabled(enabled and profile and steady)
-        self.coarse.setEnabled(enabled and steady and not custom and not profile)
+        self.coarse.setEnabled(enabled and steady and not custom and not profile and not gas)
         if not profile and self.last_scenario == PROFILE_INDEX:
             self.heat_capacity.setValue(4182.)
             self.conductivity.setValue(.6)
@@ -438,10 +522,12 @@ class Window(QtWidgets.QMainWindow):
                 control.setValue(value)
             self.mesh_info.setText("Воздух: ρ=1.225 кг/м³, ν=1.5e−5 м²/с; турбулентность входа 1%.\n"
                 "Верх/низ профиля: 0.10c / 0.06c. Nx/Ny — пиксели. Поляра требует отдельного расчёта каждого угла.")
+        elif nozzle:
+            self.mesh_info.setText("Газ: 2D Эйлер, переменные плотность и температура; энергия обязательна. Стенки скользящие, теплоизолированные; k–ε не применяется. Давление относительно противодавления." if gas else "Жидкость: несжимаемые Навье–Стокс; скорость входа, k–ε и теплообмен настраиваются отдельно. Контур сопла на прямоугольной сетке.")
         elif not custom:
             self.mesh_info.setText("")
         self.last_scenario = self.scenario.currentIndex()
-        self.run_button.setText("Рассчитать SIMPLE" if steady else "Рассчитать кадры")
+        self.run_button.setText("Рассчитать Эйлер" if gas and steady else "Рассчитать SIMPLE" if steady else "Рассчитать кадры")
         self.duration_caption.setText("Цикл анимации" if steady else "Время расчёта")
         self.initial_condition.setEnabled(enabled and not steady and (custom or profile))
         self.time_step.setEnabled(enabled and not steady)
@@ -451,6 +537,16 @@ class Window(QtWidgets.QMainWindow):
             control.setEnabled(enabled and (steady or custom or profile))
         self.duration.setToolTip("В SIMPLE это длительность воспроизведения, не физического расчёта" if steady else "Длительность физического расчёта")
         self.update_memory()
+
+    def apply_nozzle_regime(self, index):
+        if index < 3:
+            ratio = (.1, .75, .97)[index]
+            self.nozzle_back_pressure.setValue(self.nozzle_total_pressure.value()*ratio)
+            if index == 1:
+                self.mode.setCurrentIndex(1)
+                self.duration.setValue(.008)
+            elif index == 2:
+                self.iterations.setValue(40000)
 
     def open_mesh_editor(self):
         from .mesh_gui import MeshEditor
@@ -505,7 +601,9 @@ class Window(QtWidgets.QMainWindow):
         self.set_mesh(self.nx.value(), self.ny.value())
 
     def update_memory(self, *_):
-        c = Config(nx=self.nx.value(), ny=self.ny.value(), frames=self.frames.value(),
+        c = Config(scenario=NOZZLE_SCENARIO if self.scenario.currentIndex() == NOZZLE_INDEX else "channel",
+                   nozzle_model="gas" if self.nozzle_model.currentIndex() == 0 else "liquid",
+                   nx=self.nx.value(), ny=self.ny.value(), frames=self.frames.value(),
                    mode="steady" if self.mode.currentIndex() == 0 else "transient", energy=self.energy.isChecked())
         mib = c.nx*c.ny*c.frame_count*c.field_count*4/1024**2
         self.memory.setText(f"Сохранится {c.frame_count} кадров · поля {mib:.1f} МиБ."
@@ -543,7 +641,7 @@ class Window(QtWidgets.QMainWindow):
                     if kind == "progress":
                         i, n, t = value
                         self.progress.setValue(round(i/n*100))
-                        self.info.setText(f"Профиль α={t:+.1f}° · итерация {i}/{n}" if self.calculation_scenario == PROFILE_SCENARIO and self.calculation_mode == "steady" else f"SIMPLE · {'грубая сетка · ' if t < 0 else ''}итерация {i}/{n}" if self.calculation_mode == "steady"
+                        self.info.setText(f"Профиль α={t:+.1f}° · итерация {i}/{n}" if self.calculation_scenario == PROFILE_SCENARIO and self.calculation_mode == "steady" else f"{'Эйлер' if self.calculation_is_gas else 'SIMPLE'} · {'грубая сетка · ' if t < 0 else ''}итерация {i}/{n}" if self.calculation_mode == "steady"
                                           else f"Кадр {i}/{n} · t = {t:.3f} с")
                     else:
                         self.finish_worker()
@@ -591,18 +689,29 @@ class Window(QtWidgets.QMainWindow):
                 line.setVisible(False)
             self.play.setEnabled(False)
             self.slider.setEnabled(False)
-            self.field.model().item(2).setEnabled(False)
-            if self.field.currentIndex() == 2:
+            for index in (2, 3, 4):
+                self.field.model().item(index).setEnabled(False)
+            if self.field.currentIndex() >= 2:
                 self.field.setCurrentIndex(0)
             self.caption.setText("Нет завершённого результата.")
             self.time_label.setText("Расчёт остановлен")
 
+    def update_field_choices(self, data):
+        for index, name in ((2, "temperature"), (3, "mach"), (4, "density")):
+            available = getattr(data, name, None) is not None
+            self.field.model().item(index).setEnabled(available)
+            if self.field.currentIndex() == index and not available:
+                self.field.setCurrentIndex(0)
+
     def accept_preview(self, frame):
         self.preview = frame
         c = frame.config
-        self.field.model().item(2).setEnabled(frame.temperature is not None)
-        if self.field.currentIndex() == 2 and frame.temperature is None:
-            self.field.setCurrentIndex(0)
+        if c.scenario == NOZZLE_SCENARIO and frame.boundaries is None:
+            from dataclasses import replace
+            from .nozzle import boundaries
+            frame = replace(frame, boundaries=boundaries(c))
+            self.preview = frame
+        self.update_field_choices(frame)
         domain = (c.scenario, c.length, c.height, c.profile_angle, c.nx, c.ny, frame.phase == "coarse")
         if domain != self.preview_domain:
             self.preview_domain = domain
@@ -622,8 +731,8 @@ class Window(QtWidgets.QMainWindow):
                 x = (np.arange(c.nx)+.5)*c.length/c.nx
                 line.setData(np.where(row, x, np.nan), np.full(c.nx, y), connect="finite")
                 line.setPen(pg.mkPen("#60d5ed" if boundary == "open" else "#fbbf24", width=2))
-                line.setVisible(c.scenario not in ("custom", PROFILE_SCENARIO))
-        self.caption.setText("ПРЕДВАРИТЕЛЬНОЕ ПОЛЕ · расчёт продолжается. Итерации SIMPLE не являются физическим временем.")
+                line.setVisible(c.scenario not in ("custom", PROFILE_SCENARIO, NOZZLE_SCENARIO))
+        self.caption.setText("ПРЕДВАРИТЕЛЬНОЕ ПОЛЕ · 2D Эйлер: расчёт сжимаемого газа продолжается." if c.is_compressible else "ПРЕДВАРИТЕЛЬНОЕ ПОЛЕ · расчёт продолжается. Итерации SIMPLE не являются физическим временем.")
         self.change_field()
 
     def accept_result(self, result):
@@ -634,9 +743,7 @@ class Window(QtWidgets.QMainWindow):
         self.trails.setData([], [])
         self.caption.setText("Поля скорости и давления меняются во времени. Линии — мгновенные линии тока; частицы движутся по рассчитанной скорости." if self.tracers else "Стационарное поле. Маркеры показывают направление; физическое время не рассчитывается.")
         self.result = result
-        self.field.model().item(2).setEnabled(result.temperature is not None)
-        if self.field.currentIndex() == 2 and result.temperature is None:
-            self.field.setCurrentIndex(0)
+        self.update_field_choices(result)
         self.position = 0.
         self.stream_key = None
         self.paths = []
@@ -648,8 +755,8 @@ class Window(QtWidgets.QMainWindow):
         self.residual_button.setEnabled(bool(d.get("residual_history")))
         self.aero_button.setEnabled(bool(d.get("aerodynamics")))
         self.aero_toolbar.setEnabled(bool(d.get("aerodynamics")))
-        state = (f"SIMPLE: {'сошлось' if d['converged'] else 'НЕ СОШЛОСЬ — достигнут лимит'}\n"
-                 f"Итераций: {d['iterations']}; макс. невязка: {max(d['residuals'].values()):.2e}\n"
+        state = (f"{'Эйлер' if result.config.is_compressible else 'SIMPLE'}: {'сошлось' if d['converged'] else 'НЕ СОШЛОСЬ — достигнут лимит'}\n"
+                 f"Итераций: {d['iterations']}; макс. невязка: {(d['residuals']['u'] if result.config.is_compressible else max(d['residuals'].values())):.2e}\n"
                  if result.config.mode == "steady" else "")
         self.info.setText(state+f"Расчёт завершён · {d.get('wall_seconds', 0):.2f} с\n"
             f"Re = {d['reynolds']:.0f}\nΔp вход–выход = {d['pressure_drop_pa']:.2f} Па\n"
@@ -658,7 +765,7 @@ class Window(QtWidgets.QMainWindow):
             + ("Обратный поток на выходе: увеличьте длину канала.\n" if d['backflow'] else "")
             + (f"Температура: {d['energy']['min_temperature_k']:.2f}…{d['energy']['max_temperature_k']:.2f} K\n"
                f"Небаланс энергии: {d['energy']['relative_imbalance']:.2e}\n" if "energy" in d else "")
-            + ("Модель: k–ε.\n" if result.config.turbulence else "Модель: ламинарная.\n")
+            + ("Модель: сжимаемый идеальный газ, 2D Эйлер.\n" if result.config.is_compressible else "Модель: k–ε.\n" if result.config.turbulence else "Модель: ламинарная.\n")
             + "Сходимость и точность см. в отчёте проверки.")
         c = result.config
         self.turbulence.setChecked(c.turbulence)
@@ -694,10 +801,27 @@ class Window(QtWidgets.QMainWindow):
                 self.mesh_info.setText(f"Профиль · α={c.profile_angle:+.1f}° · {d['mesh_cells']} элементов\n"
                     f"Cl={last['cl']:.4f} · Cd={last['cd']:.4f} · Cl/Cd={ratio}\n"
                     f"Поляра: {len(aero.get('polar', []))} углов. ρ={c.rho:g}; силы на единичный размах.")
+        elif c.scenario == NOZZLE_SCENARIO:
+            self.scenario.setCurrentIndex(NOZZLE_INDEX)
+            self.nozzle_model.setCurrentIndex(0 if c.nozzle_model == "gas" else 1)
+            self.nozzle_regime.setCurrentIndex(3)
+            for name in self.nozzle_parameters:
+                getattr(self, name).setValue(getattr(c, name))
+            if c.is_compressible:
+                n = d['nozzle']
+                self.mesh_info.setText(f"2D газ · M горловины={n['throat_mach']:.3f}, M выхода={n['exit_mach']:.3f}\n"
+                    f"Расход: {n['mass_out_kg_s_per_m']:.4f} кг/(с·м)\n"
+                    f"Баланс массы с накоплением: {n['relative_mass_conservation_error']:.2e}; энергии: {n['relative_energy_conservation_error']:.2e}\n"
+                    "Эйлер: без вязкости и k–ε. p относительно противодавления.")
+            else:
+                self.mesh_info.setText("Сопло Лаваля · несжимаемая жидкость; дозвуковой расчёт Навье–Стокса.")
         else:
             self.scenario.setCurrentIndex(list(SCENARIOS).index(c.scenario))
             self.mesh_info.setText("")
         result_mesh_info = self.mesh_info.text()
+        self.iterations.setValue(c.max_iterations)
+        self.turbulence.setChecked(c.turbulence)
+        self.energy.setChecked(c.energy)
         self.top.setCurrentIndex(0 if c.top == "wall" else 1)
         self.bottom.setCurrentIndex(0 if c.bottom == "wall" else 1)
         self.frames.setValue(c.frames)
@@ -713,9 +837,16 @@ class Window(QtWidgets.QMainWindow):
         self.set_mesh(c.nx, c.ny)
         self.image.setImage(np.zeros((c.ny, c.nx)), autoLevels=False)
         self.image.setRect(QtCore.QRectF(0, 0, c.length, c.height))
+        nozzle_bounds = None
+        if c.scenario == NOZZLE_SCENARIO:
+            from .nozzle import boundaries
+            nozzle_bounds = boundaries(c)
         for tag, line in self.custom_lines.items():
-            line.setVisible(result.native is not None)
-            if result.native is not None:
+            line.setVisible(result.native is not None or nozzle_bounds is not None)
+            if nozzle_bounds is not None:
+                coords = nozzle_bounds[tag]
+                line.setData(coords[:, 0], coords[:, 1])
+            elif result.native is not None:
                 native = result.native
                 points = native["points"]-native["points"].min(axis=0)
                 edges = points[native["boundary_edges"][native["boundary_tags"] == tag]]
@@ -728,7 +859,7 @@ class Window(QtWidgets.QMainWindow):
             line.setData(np.where(row, x, np.nan), np.full(c.nx, y), connect="finite")
             line.setPen(pg.mkPen("#60d5ed" if boundary == "open" else "#fbbf24", width=2,
                 style=QtCore.Qt.PenStyle.DashLine if boundary == "open" else QtCore.Qt.PenStyle.SolidLine))
-            line.setVisible(result.native is None)
+            line.setVisible(result.native is None and c.scenario != NOZZLE_SCENARIO)
         self.caption.setToolTip("Жёлтая граница — стенка. Голубая пунктирная — открытая граница давления.")
         self.plot.setRange(xRange=(0, c.length), yRange=(0, c.height), padding=.05)
         self.change_field()
@@ -738,7 +869,7 @@ class Window(QtWidgets.QMainWindow):
         if self.result is None and self.preview is None:
             return
         r = self.preview if self.preview is not None else self.result
-        values = np.hypot(r.u, r.v) if self.field.currentIndex() == 0 else r.pressure if self.field.currentIndex() == 1 else r.temperature
+        values = np.hypot(r.u, r.v) if self.field.currentIndex() == 0 else getattr(r, ("", "pressure", "temperature", "mach", "density")[self.field.currentIndex()])
         values = values[r.fluid] if self.preview is not None else values[:, r.fluid]
         low, high = float(values.min()), float(values.max())
         if self.field.currentIndex() == 1:
@@ -757,8 +888,8 @@ class Window(QtWidgets.QMainWindow):
         t = r.physical_time if live else self.position
         if live:
             u, v = r.u, r.v
-            field = np.hypot(u, v) if self.field.currentIndex() == 0 else r.pressure if self.field.currentIndex() == 1 else r.temperature
-            stage = {"flow": "SIMPLE", "step": "шаг", "energy": "энергия", "coarse": "грубая сетка"}[r.phase]
+            field = np.hypot(u, v) if self.field.currentIndex() == 0 else getattr(r, ("", "pressure", "temperature", "mach", "density")[self.field.currentIndex()])
+            stage = {"flow": "SIMPLE", "step": "шаг", "energy": "энергия", "coarse": "грубая сетка", "euler": "Эйлер"}[r.phase]
             angle = f" · α={r.config.profile_angle:+.1f}°" if r.config.scenario == PROFILE_SCENARIO else ""
             self.time_label.setText(f"Предпросмотр · {stage} · итерация {r.iteration}"+
                 (f" · t={t:.6g} с" if r.config.mode == "transient" else "")+angle)
@@ -768,7 +899,7 @@ class Window(QtWidgets.QMainWindow):
             def blend(q):
                 return q[index]*(1-alpha)+q[index+1]*alpha
             u, v = blend(r.u), blend(r.v)
-            field = np.hypot(u, v) if self.field.currentIndex() == 0 else blend(r.pressure) if self.field.currentIndex() == 1 else blend(r.temperature)
+            field = np.hypot(u, v) if self.field.currentIndex() == 0 else blend(getattr(r, ("", "pressure", "temperature", "mach", "density")[self.field.currentIndex()]))
             self.slider.setValue(round(t/r.config.duration*10000))
             self.time_label.setText(f"{'Анимация' if r.config.mode == 'steady' else 't'} = {t:.3f} с")
         self.image.setImage(np.where(r.fluid, field, np.nan), autoLevels=False)
@@ -828,7 +959,7 @@ class Window(QtWidgets.QMainWindow):
         if self.result is None or not self.result.diagnostics.get("residual_history"):
             return
         dialog = QtWidgets.QDialog(self)
-        dialog.setWindowTitle("Невязки стационарного SIMPLE")
+        dialog.setWindowTitle("Сходимость газового сопла · Эйлер" if self.result.config.is_compressible else "Невязки стационарного SIMPLE")
         dialog.resize(760, 480)
         layout = QtWidgets.QVBoxLayout(dialog)
         plot = pg.PlotWidget()
@@ -838,13 +969,16 @@ class Window(QtWidgets.QMainWindow):
         plot.setLabel("left", "Нормированная невязка")
         history = self.result.diagnostics["residual_history"]
         x = [row["iteration"] for row in history]
-        for key, color in zip(("u", "v", "k", "e", "continuity"),
-                              ("#5eead4", "#60a5fa", "#fbbf24", "#f472b6", "#c4b5fd")):
-            plot.plot(x, [max(row[key], 1e-16) for row in history], pen=color, name=key)
+        series = [(key, key, color) for key, color in zip(("u", "v", "k", "e", "continuity"),
+                    ("#5eead4", "#60a5fa", "#fbbf24", "#f472b6", "#c4b5fd"))]
+        if self.result.config.is_compressible:
+            series = [("u", "Система Эйлера", "#5eead4"), ("continuity", "Разность расходов", "#c4b5fd")]
+        for key, label, color in series:
+            plot.plot(x, [max(row[key], 1e-16) for row in history], pen=color, name=label)
         plot.addItem(pg.InfiniteLine(pos=np.log10(self.result.config.tolerance), angle=0,
                                     pen=pg.mkPen("#ffffff", style=QtCore.Qt.PenStyle.DashLine)))
         layout.addWidget(plot)
-        layout.addWidget(QtWidgets.QLabel("Сходимость требует всех невязок ниже порога три итерации подряд."))
+        layout.addWidget(QtWidgets.QLabel("Эйлер: общая невязка (u/v) < ε; относительная разность расходов < max(10ε, 1e−5)." if self.result.config.is_compressible else "Сходимость требует всех невязок ниже порога три итерации подряд."))
         dialog.exec()
 
     def export_native(self):
