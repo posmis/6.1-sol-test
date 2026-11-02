@@ -53,7 +53,7 @@ def coefficients(pressure, normals, lengths, wall_velocity, distances, rho, nu, 
                 shear_drag_n_per_m=float(shear_force[0]), shear_lift_n_per_m=float(shear_force[1]))
 
 
-def solve_profile(config, progress=None, cancel=None):
+def solve_profile(config, progress=None, cancel=None, preview=None):
     from .unstructured import solve
     c = config
     angles = [c.profile_angle]
@@ -76,7 +76,7 @@ def solve_profile(config, progress=None, cancel=None):
             path = Path(directory)/f"profile-{index}.flowmesh"
             mesh.save(path)
             one = replace(c, profile_angle=angle, mesh_path=str(path), profile_sweep=())
-            result = solve(one, (lambda i, n, t: progress(i, n, angle if c.mode == "steady" else t)) if progress else None, cancel)
+            result = solve(one, (lambda i, n, t: progress(i, n, angle if c.mode == "steady" else t)) if progress else None, cancel, preview=preview)
             aero = result.diagnostics["aerodynamics"]
             points.append(dict(angle=angle, **aero["final"], converged=result.diagnostics["converged"],
                                iterations=result.diagnostics["iterations"],

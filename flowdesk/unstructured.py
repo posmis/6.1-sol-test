@@ -83,7 +83,7 @@ def rasterize(project, values, nx, ny):
 
 
 @threadpool_limits.wrap(limits=1, user_api="blas")
-def solve(config, progress=None, cancel=None):
+def solve(config, progress=None, cancel=None, preview=None):
     os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir())/"flowdesk-mpl"))
     os.environ.setdefault("MPLBACKEND", "Agg")
     from fipy import CellVariable, FaceVariable, DiffusionTerm, UpwindConvectionTerm, ImplicitSourceTerm, TransientTerm
@@ -180,6 +180,20 @@ def solve(config, progress=None, cancel=None):
     times = np.linspace(0., c.duration, c.frame_count)
     cell_ids, fluid = raster_sampler(project, c.nx, c.ny)
     frames = [np.empty((len(times), c.ny, c.nx), np.float32) for _ in range(5)]
+    live = None
+    if preview:
+        from .live import PreviewEmitter
+        boundaries = {}
+        for tag in ("inlet", "outlet", "wall", "open"):
+            edges = project.points[project.boundary_edges[project.boundary_tags == tag]]-[xmin, ymin]
+            boundaries[tag] = np.concatenate([edges, np.full((len(edges), 1, 2), np.nan)], axis=1).reshape(-1, 2).astype(np.float32)
+        live = PreviewEmitter(preview, c, fluid, cell_ids=cell_ids, boundaries=boundaries)
+    def preview_values():
+        ref = np.average(k.value[owner[opened]], weights=face_area[opened])
+        static = (p.value-2*k.value/3+2*ref/3)*c.rho
+        return u.value, v.value, static, thermal.temperature if thermal else None
+    if live:
+        live.emit(0, 0., preview_values, force=True)
     def snapshot(index):
         ref = np.average(k.value[owner[opened]], weights=face_area[opened])
         static = (p.value-2*k.value/3+2*ref/3)*c.rho
@@ -288,6 +302,8 @@ def solve(config, progress=None, cancel=None):
                                       np.vstack([u.value[wc], v.value[wc]]), distances,
                                       c.rho, c.nu, c.speed, c.profile_chord, turbulence=c.turbulence)
                 aero_history.append(dict(iteration=iteration, **forces))
+            if live:
+                live.emit(total_iterations+iteration, physical_time, preview_values)
             consecutive = consecutive+1 if max(residual.values()) < c.tolerance else 0
             if progress and not transient:
                 progress(iteration, c.max_iterations, 0.)
@@ -297,8 +313,11 @@ def solve(config, progress=None, cancel=None):
         total_iterations += iteration
         if thermal is not None and (converged or not transient):
             nut = np.minimum(.09*np.asarray(k.value)**2/np.maximum(e.value, 1e-12), .1*c.speed*reference_length)
-            budget = thermal.advance(linear, nut, dt)
+            budget = thermal.advance(linear, nut, dt,
+                preview=(lambda: live.emit(total_iterations, physical_time, preview_values, phase="energy")) if live else None)
             energy_history.append(dict(time=physical_time, **budget))
+        if live:
+            live.emit(total_iterations, physical_time, preview_values, phase="step" if transient else "flow")
         if transient:
             if not converged:
                 raise RuntimeError(f"Шаг времени t={physical_time:.6g} с не сошёлся: {residual}. "
@@ -355,4 +374,7 @@ def solve(config, progress=None, cancel=None):
             final={key: value for key, value in aero_history[-1].items() if key != "iteration"},
             note="Forces on profile only, per unit span; pressure plus wall shear (log law for k-epsilon, viscous gradient for laminar). Not wind-tunnel validated.")
         diagnostics["reynolds"] = c.speed*c.profile_chord/c.nu
+    if live:
+        live.emit(total_iterations, c.duration if transient else 0., preview_values,
+                  phase="step" if transient else "energy" if c.energy else "flow", force=True)
     return Result(c, times, *fields, fluid, diagnostics, native=native, temperature=temperature)

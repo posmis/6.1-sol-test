@@ -35,8 +35,11 @@ def test_desktop_energy_checkbox_calculation_animation_and_reload(tmp_path):
             time.sleep(.01)
         assert w.result is not None, w.info.text()
         assert not w.result.config.turbulence and w.result.config.energy
+        assert w.position == w.result.config.duration
+        assert w.slider.value() == 10000
         assert w.field.model().item(2).isEnabled()
         w.field.setCurrentIndex(2)
+        np.testing.assert_allclose(w.image.image[w.result.fluid], w.result.temperature[-1, w.result.fluid])
         w.seek(0)
         first = w.image.image.copy()
         w.seek(10000)

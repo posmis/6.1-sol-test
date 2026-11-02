@@ -94,7 +94,7 @@ def prolongate(old, name, coarse, fine, shape):
     return map_coordinates(old, [yy, xx], order=1, mode="nearest")
 
 
-def warm_start(solver, cancel, progress):
+def warm_start(solver, cancel, progress, preview=None):
     """Solve a small version first and interpolate each staggered field separately."""
     from .solver import Solver
     c = solver.c
@@ -106,7 +106,8 @@ def warm_start(solver, cancel, progress):
                             tolerance=max(c.tolerance, 5e-4))
     coarse = Solver(coarse_config)
     result = solve(coarse, cancel=cancel,
-                   progress=(lambda i, n, t: progress(i, n, -1.) if i % 10 == 0 else None) if progress else None)
+                   progress=(lambda i, n, t: progress(i, n, -1.) if i % 10 == 0 else None) if progress else None,
+                   preview=(lambda frame: preview(replace(frame, phase="coarse"))) if preview else None)
     for name in ("u", "v", "p", "k", "e"):
         old = getattr(coarse, name)
         shape = getattr(solver, name).shape
@@ -124,13 +125,17 @@ def warm_start(solver, cancel, progress):
 
 
 @threadpool_limits.wrap(limits=1, user_api="blas")
-def solve(s, progress=None, cancel=None):
+def solve(s, progress=None, cancel=None, preview=None):
     from .solver import Result
     started = time.perf_counter()
     c, f, dx, dy = s.c, s.fluid, s.dx, s.dy
     if progress:
         progress(0, c.max_iterations, 0.)
-    coarse = warm_start(s, cancel, progress)
+    from .live import PreviewEmitter, structured_values
+    live = PreviewEmitter(preview, c, f) if preview else None
+    if live:
+        live.emit(0, 0., lambda: structured_values(s), force=True)
+    coarse = warm_start(s, cancel, progress, preview=preview)
     linear = LinearSolves(cancel)
     ukind, vkind = np.zeros(s.u.shape, np.int32), np.zeros(s.v.shape, np.int32)
     ukind[:, 0], ukind[:, -1] = 1, 3
@@ -212,6 +217,8 @@ def solve(s, progress=None, cancel=None):
         if not all(np.isfinite(q).all() for q in (s.u, s.v, s.p, s.k, s.e)):
             raise FloatingPointError("SIMPLE diverged")
         history.append(dict(iteration=iteration, **residual))
+        if live:
+            live.emit(iteration, 0., lambda: structured_values(s))
         successful = successful+1 if max(residual.values()) < c.tolerance else 0
         if progress:
             progress(iteration, c.max_iterations, 0.)
@@ -221,6 +228,8 @@ def solve(s, progress=None, cancel=None):
     temperature = None
     if c.energy:
         from .thermal import structured_steady
+        if live:
+            live.emit(iteration, 0., lambda: structured_values(s), phase="energy", force=True)
         structured_steady(s, linear)
         temperature = np.repeat(np.where(f, s.temperature, 0.)[None].astype(np.float32), 2, axis=0)
     uc, vc = s.centres()
@@ -242,4 +251,6 @@ def solve(s, progress=None, cancel=None):
     diagnostics["turbulence_model"] = "k-epsilon" if c.turbulence else "laminar"
     if c.energy:
         diagnostics["energy"] = s.energy_budget
+    if live:
+        live.emit(iteration, 0., lambda: structured_values(s), phase="energy" if c.energy else "flow", force=True)
     return Result(c, np.array([0., c.duration]), *fields, f.copy(), diagnostics, temperature=temperature)

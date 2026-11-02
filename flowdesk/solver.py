@@ -327,16 +327,20 @@ class Solver:
         return dt
 
     @threadpool_limits.wrap(limits=1, user_api="blas")
-    def run(self, progress=None, cancel=None):
+    def run(self, progress=None, cancel=None, preview=None):
         if self.c.scenario == PROFILE_SCENARIO:
             from .airfoil import solve_profile
-            return solve_profile(self.c, progress, cancel)
+            return solve_profile(self.c, progress, cancel, preview=preview)
         if self.c.scenario == "custom":
             from .unstructured import solve
-            return solve(self.c, progress, cancel)
+            return solve(self.c, progress, cancel, preview=preview)
         if self.c.mode == "steady":
             from .steady import solve
-            return solve(self, progress, cancel)
+            return solve(self, progress, cancel, preview=preview)
+        from .live import PreviewEmitter, structured_values
+        live = PreviewEmitter(preview, self.c, self.fluid) if preview else None
+        if live:
+            live.emit(0, 0., lambda: structured_values(self), force=True)
         self.solve_p.cancel = cancel
         times = np.linspace(0, self.c.duration, self.c.frame_count)
         fields = [np.empty((len(times), self.c.ny, self.c.nx), np.float32) for _ in range(5)]
@@ -349,6 +353,8 @@ class Solver:
                     raise InterruptedError("Calculation cancelled")
                 t += self.step(min(target-t, self.c.time_step) if self.c.time_step else target-t)
                 steps += 1
+                if live:
+                    live.emit(steps, t, lambda: structured_values(self), phase="step")
                 maxdiv = max(maxdiv, float(np.max(abs(self.divergence()[self.fluid]))))
             uc, vc = self.centres()
             if last is not None:
@@ -379,4 +385,6 @@ class Solver:
         diagnostics["turbulence_model"] = "k-epsilon" if self.c.turbulence else "laminar"
         if self.c.energy:
             diagnostics["energy"] = dict(history=self.energy_history, **self.energy_budget)
+        if live:
+            live.emit(steps, t, lambda: structured_values(self), phase="step", force=True)
         return Result(self.c, times, *fields, self.fluid.copy(), diagnostics, temperature=temperature)

@@ -140,7 +140,7 @@ class NativeThermal:
     def temperature(self):
         return np.asarray(self.theta.value)+self.c.temperature_inlet
 
-    def advance(self, linear, nut, dt):
+    def advance(self, linear, nut, dt, preview=None):
         from .unstructured import implicit_solve
         c = self.c
         self.alpha.setValue(c.thermal_diffusivity+nut/c.turbulent_prandtl)
@@ -153,6 +153,8 @@ class NativeThermal:
         for _ in range(c.max_iterations):
             residual, _ = implicit_solve(linear, self.equation, self.theta, 'temperature', 1.,
                                         temperature_scale(c)*c.speed/c.length, dt=dt)
+            if preview:
+                preview()
             consecutive = consecutive+1 if residual < c.tolerance else 0
             if consecutive >= 2:
                 break

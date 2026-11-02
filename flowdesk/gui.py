@@ -9,6 +9,7 @@ import numpy as np
 from PySide6 import QtCore, QtWidgets
 import pyqtgraph as pg
 from .solver import Config, Result, Solver
+from .live import PreviewMailbox
 from .visualization import streamlines, Tracers
 from .scenarios import SCENARIOS, PROFILE_SCENARIO, PROFILE_LABEL
 
@@ -19,11 +20,12 @@ GRID_PRESETS = [(64, 16), (96, 24), (144, 36), (256, 64), (512, 128),
                 (1024, 256), (1024, 1024)]
 
 
-def calculate(config, messages, cancel):
+def calculate(config, messages, cancel, previews=None):
     try:
         started = time.perf_counter()
         result = Solver(config).run(
-            lambda i, n, t: messages.put(("progress", (i, n, t))), cancel)
+            lambda i, n, t: messages.put(("progress", (i, n, t))), cancel,
+            preview=previews.publish if previews is not None else None)
         result.diagnostics["wall_seconds"] = time.perf_counter()-started
         messages.put(("result", result))
     except InterruptedError:
@@ -45,6 +47,10 @@ class Window(QtWidgets.QMainWindow):
         self.resize(1240, 780)
         self.tracers = None
         self.result = None
+        self.preview = None
+        self.preview_mailbox = None
+        self.preview_domain = None
+        self.calculation_id = 0
         self.process = None
         self.custom_mesh_path = None
         self.mesh_editors = []
@@ -205,6 +211,7 @@ class Window(QtWidgets.QMainWindow):
         save.clicked.connect(self.save)
         load = QtWidgets.QPushButton("Открыть результат…")
         load.clicked.connect(self.load)
+        self.save_button, self.load_button = save, load
         self.residual_button = QtWidgets.QPushButton("Невязки SIMPLE…")
         self.residual_button.setEnabled(False)
         self.residual_button.clicked.connect(self.show_residuals)
@@ -358,11 +365,31 @@ class Window(QtWidgets.QMainWindow):
                    profile_cells=self.profile_cells.value(), profile_sweep=angles)
         self.playing = False
         self.play.setText("▶ Воспроизвести")
+        self.preview = None
+        self.preview_domain = None
+        self.calculation_id += 1
+        self.preview_mailbox = PreviewMailbox(self.context)
+        self.play.setEnabled(False)
+        self.slider.setEnabled(False)
+        for control in (self.save_button, self.load_button, self.native_export, self.residual_button,
+                        self.aero_button, self.aero_toolbar):
+            control.setEnabled(False)
+        self.tracers = None
+        self.paths = []
+        self.stream_key = None
+        self.line.setData([], [])
+        self.particles.setData([], [])
+        self.trails.setData([], [])
+        self.image.setImage(np.zeros((min(c.ny, 192), min(c.nx, 320))), autoLevels=False)
+        self.image.setRect(QtCore.QRectF(0, 0, c.length, c.height))
+        for line in self.boundaries+list(self.custom_lines.values()):
+            line.setVisible(False)
+        self.caption.setText("Идёт расчёт: ожидается первое промежуточное поле…")
         self.messages = self.context.Queue()
         self.calculation_mode = c.mode
         self.calculation_scenario = c.scenario
         self.cancel_event = self.context.Event()
-        self.process = self.context.Process(target=calculate, args=(c, self.messages, self.cancel_event))
+        self.process = self.context.Process(target=calculate, args=(c, self.messages, self.cancel_event, self.preview_mailbox))
         self.process.start()
         for widget in self.settings+[self.run_button]:
             widget.setEnabled(False)
@@ -489,6 +516,9 @@ class Window(QtWidgets.QMainWindow):
         self.process.join(timeout=.1)
         self.process = None
         self.messages.close()
+        self.preview_mailbox = None
+        self.save_button.setEnabled(True)
+        self.load_button.setEnabled(True)
         for widget in self.settings+[self.run_button]:
             widget.setEnabled(True)
         self.cancel_button.setEnabled(False)
@@ -503,6 +533,10 @@ class Window(QtWidgets.QMainWindow):
         now = time.perf_counter()
         elapsed, self.last_tick = now-self.last_tick, now
         if self.process is not None:
+            if self.preview_mailbox is not None:
+                frame = self.preview_mailbox.take_latest()
+                if frame is not None:
+                    self.accept_preview(frame)
             try:
                 while True:
                     kind, value = self.messages.get_nowait()
@@ -515,11 +549,16 @@ class Window(QtWidgets.QMainWindow):
                         self.finish_worker()
                         if kind == "result":
                             self.accept_result(value)
+                            if value.config.mode == "transient":
+                                self.position = value.config.duration
+                                self.render()
                         elif kind == "error":
+                            self.discard_preview()
                             self.info.setText("Ошибка расчёта")
                             from .error_report import ErrorDialog
                             ErrorDialog("Ошибка расчёта — полный отчёт", value, self).exec()
                         else:
+                            self.discard_preview()
                             self.info.setText("Расчёт отменён")
                         break
             except queue.Empty:
@@ -527,15 +566,70 @@ class Window(QtWidgets.QMainWindow):
                 if self.process is not None and self.process.exitcode is not None:
                     code = self.process.exitcode
                     self.finish_worker()
+                    self.discard_preview()
                     self.info.setText(f"Процесс завершился без результата (код {code}).")
-        if self.playing and self.result is not None:
+        if self.process is None and self.playing and self.result is not None:
             speed = [.25, .5, 1, 2][self.rate.currentIndex()]
             self.position = (self.position+elapsed*speed*(self.result.config.duration/8 if self.result.config.mode == "transient" else 1.)) % self.result.config.duration
             self.render()
         elif self.show_lines.isChecked() and self.stream_future is not None and self.stream_future[2].done():
             self.render()
 
+    def discard_preview(self):
+        self.preview = None
+        self.preview_domain = None
+        if self.result is not None:
+            self.accept_result(self.result)
+        else:
+            self.line.setData([], [])
+            self.particles.setData([], [])
+            self.trails.setData([], [])
+            self.image.setImage(np.zeros((8, 16)), autoLevels=False)
+            for line in self.custom_lines.values():
+                line.setVisible(False)
+            for line in self.boundaries:
+                line.setVisible(False)
+            self.play.setEnabled(False)
+            self.slider.setEnabled(False)
+            self.field.model().item(2).setEnabled(False)
+            if self.field.currentIndex() == 2:
+                self.field.setCurrentIndex(0)
+            self.caption.setText("Нет завершённого результата.")
+            self.time_label.setText("Расчёт остановлен")
+
+    def accept_preview(self, frame):
+        self.preview = frame
+        c = frame.config
+        self.field.model().item(2).setEnabled(frame.temperature is not None)
+        if self.field.currentIndex() == 2 and frame.temperature is None:
+            self.field.setCurrentIndex(0)
+        domain = (c.scenario, c.length, c.height, c.profile_angle, c.nx, c.ny, frame.phase == "coarse")
+        if domain != self.preview_domain:
+            self.preview_domain = domain
+            self.paths = []
+            self.stream_key = None
+            self.line.setData([], [])
+            self.image.setImage(np.zeros(frame.fluid.shape), autoLevels=False)
+            self.image.setRect(QtCore.QRectF(0, 0, c.length, c.height))
+            self.plot.setRange(xRange=(0, c.length), yRange=(0, c.height), padding=.05)
+            for tag, line in self.custom_lines.items():
+                line.setVisible(frame.boundaries is not None)
+                if frame.boundaries is not None:
+                    coords = frame.boundaries[tag]
+                    line.setData(coords[:, 0], coords[:, 1])
+            for line, boundary, row, y in zip(self.boundaries, (c.bottom, c.top),
+                                             (frame.fluid[0], frame.fluid[-1]), (0., c.height)):
+                x = (np.arange(c.nx)+.5)*c.length/c.nx
+                line.setData(np.where(row, x, np.nan), np.full(c.nx, y), connect="finite")
+                line.setPen(pg.mkPen("#60d5ed" if boundary == "open" else "#fbbf24", width=2))
+                line.setVisible(c.scenario not in ("custom", PROFILE_SCENARIO))
+        self.caption.setText("ПРЕДВАРИТЕЛЬНОЕ ПОЛЕ · расчёт продолжается. Итерации SIMPLE не являются физическим временем.")
+        self.change_field()
+
     def accept_result(self, result):
+        self.preview = None
+        self.preview_domain = None
+        self.slider.setEnabled(True)
         self.tracers = Tracers(result) if result.config.mode == "transient" else None
         self.trails.setData([], [])
         self.caption.setText("Поля скорости и давления меняются во времени. Линии — мгновенные линии тока; частицы движутся по рассчитанной скорости." if self.tracers else "Стационарное поле. Маркеры показывают направление; физическое время не рассчитывается.")
@@ -641,11 +735,11 @@ class Window(QtWidgets.QMainWindow):
         self.progress.setValue(100)
 
     def change_field(self, *_):
-        if self.result is None:
+        if self.result is None and self.preview is None:
             return
-        r = self.result
+        r = self.preview if self.preview is not None else self.result
         values = np.hypot(r.u, r.v) if self.field.currentIndex() == 0 else r.pressure if self.field.currentIndex() == 1 else r.temperature
-        values = values[:, r.fluid]
+        values = values[r.fluid] if self.preview is not None else values[:, r.fluid]
         low, high = float(values.min()), float(values.max())
         if self.field.currentIndex() == 1:
             bound = max(abs(low), abs(high), 1e-6)
@@ -655,35 +749,48 @@ class Window(QtWidgets.QMainWindow):
         self.render()
 
     def render(self, *_):
-        if self.result is None:
+        live = self.preview is not None
+        if (self.result is None and not live) or (self.process is not None and not live):
             return
-        r, t = self.result, self.position
-        index = int(np.clip(np.searchsorted(r.time, t, side="right")-1, 0, len(r.time)-2))
-        alpha = np.clip((t-r.time[index])/(r.time[index+1]-r.time[index]), 0, 1)
-        def blend(q):
-            return q[index]*(1-alpha)+q[index+1]*alpha
-        u, v = blend(r.u), blend(r.v)
-        field = np.hypot(u, v) if self.field.currentIndex() == 0 else blend(r.pressure) if self.field.currentIndex() == 1 else blend(r.temperature)
+        r = self.preview if live else self.result
+        owner_token = ("preview", self.calculation_id, self.preview_domain) if live else ("result", id(r))
+        t = r.physical_time if live else self.position
+        if live:
+            u, v = r.u, r.v
+            field = np.hypot(u, v) if self.field.currentIndex() == 0 else r.pressure if self.field.currentIndex() == 1 else r.temperature
+            stage = {"flow": "SIMPLE", "step": "шаг", "energy": "энергия", "coarse": "грубая сетка"}[r.phase]
+            angle = f" · α={r.config.profile_angle:+.1f}°" if r.config.scenario == PROFILE_SCENARIO else ""
+            self.time_label.setText(f"Предпросмотр · {stage} · итерация {r.iteration}"+
+                (f" · t={t:.6g} с" if r.config.mode == "transient" else "")+angle)
+        else:
+            index = int(np.clip(np.searchsorted(r.time, t, side="right")-1, 0, len(r.time)-2))
+            alpha = np.clip((t-r.time[index])/(r.time[index+1]-r.time[index]), 0, 1)
+            def blend(q):
+                return q[index]*(1-alpha)+q[index+1]*alpha
+            u, v = blend(r.u), blend(r.v)
+            field = np.hypot(u, v) if self.field.currentIndex() == 0 else blend(r.pressure) if self.field.currentIndex() == 1 else blend(r.temperature)
+            self.slider.setValue(round(t/r.config.duration*10000))
+            self.time_label.setText(f"{'Анимация' if r.config.mode == 'steady' else 't'} = {t:.3f} с")
         self.image.setImage(np.where(r.fluid, field, np.nan), autoLevels=False)
-        self.slider.setValue(round(t/r.config.duration*10000))
-        self.time_label.setText(f"{'Анимация' if r.config.mode == 'steady' else 't'} = {t:.3f} с")
         self.line.setVisible(self.show_lines.isChecked())
-        self.particles.setVisible(self.show_lines.isChecked())
-        self.trails.setVisible(self.show_lines.isChecked() and self.tracers is not None)
+        self.particles.setVisible(self.show_lines.isChecked() and not live)
+        self.trails.setVisible(self.show_lines.isChecked() and self.tracers is not None and not live)
         if self.show_lines.isChecked():
-            key = int(t/r.config.duration*80)  # integrate only eight frozen fields per simulated second
+            key = (r.iteration, r.config.profile_angle, r.phase == "coarse") if live else int(t/r.config.duration*80)  # integrate only eight frozen fields per simulated second
             if self.stream_future is not None and self.stream_future[2].done():
                 owner, sampled_key, future = self.stream_future
                 self.stream_future = None
-                if owner == id(r):
+                if owner == owner_token:
                     self.paths = future.result()
                     self.stream_key = sampled_key
                     joined = np.concatenate([np.vstack([p, [np.nan, np.nan]]) for p in self.paths]) if self.paths else np.empty((0, 2))
                     self.line.setData(joined[:, 0], joined[:, 1])
             if self.stream_key != key and self.stream_future is None:
                 # Integration never blocks the playback timer; one pending field at most.
-                self.stream_future = (id(r), key, self.stream_pool.submit(
+                self.stream_future = (owner_token, key, self.stream_pool.submit(
                     streamlines, u.copy(), v.copy(), r.fluid, r.config.length, r.config.height))
+            if live:
+                return
             if self.tracers is not None:
                 dots, trails = self.tracers.advance(t)
                 self.particles.setData(dots[:, 0], dots[:, 1])
@@ -695,16 +802,20 @@ class Window(QtWidgets.QMainWindow):
                 self.particles.setData(dots[:, 0], dots[:, 1]) if len(dots) else self.particles.setData([], [])
 
     def toggle(self):
+        if self.process is not None:
+            return
         self.playing = not self.playing
         self.play.setText("⏸ Пауза" if self.playing else "▶ Воспроизвести")
 
     def seek(self, value):
+        if self.process is not None:
+            return
         if self.result is not None:
             self.position = value/10000*self.result.config.duration
             self.render()
 
     def save(self):
-        if self.result is None:
+        if self.process is not None or self.preview is not None or self.result is None:
             return
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Сохранить расчёт", "flow.npz", "FlowDesk (*.npz)")
         if path:
@@ -737,7 +848,7 @@ class Window(QtWidgets.QMainWindow):
         dialog.exec()
 
     def export_native(self):
-        if self.result is None or self.result.native is None:
+        if self.process is not None or self.preview is not None or self.result is None or self.result.native is None:
             return
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Поля на расчётных элементах", "flow.vtu", "VTK unstructured (*.vtu)")
         if path:
@@ -757,6 +868,8 @@ class Window(QtWidgets.QMainWindow):
         dialog.show()
 
     def load(self):
+        if self.process is not None:
+            return
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Открыть расчёт", "", "FlowDesk (*.npz)")
         if path:
             try:
