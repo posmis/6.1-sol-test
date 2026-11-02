@@ -41,7 +41,7 @@ def calculate(config, messages, cancel):
 class Window(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("FlowDesk · 2D RANS / k–ε")
+        self.setWindowTitle("FlowDesk · 2D CFD / теплообмен")
         self.resize(1240, 780)
         self.tracers = None
         self.result = None
@@ -66,7 +66,7 @@ class Window(QtWidgets.QMainWindow):
         title = QtWidgets.QLabel("FLOWDESK")
         title.setStyleSheet("font-size: 27px; font-weight: 700; color: #5eead4")
         left.addWidget(title)
-        left.addWidget(QtWidgets.QLabel("Лаборатория течений · 2D RANS"))
+        left.addWidget(QtWidgets.QLabel("Лаборатория течений · 2D CFD"))
         mesh_editor_button = QtWidgets.QPushButton("Геометрия и сетка (DXF)…")
         mesh_editor_button.clicked.connect(self.open_mesh_editor)
         mesh_load_button = QtWidgets.QPushButton("Загрузить свою сетку .flowmesh…")
@@ -81,6 +81,20 @@ class Window(QtWidgets.QMainWindow):
         self.mode = QtWidgets.QComboBox()
         self.mode.addItems(["Стационарный · SIMPLE", "Нестационарный · анимация полей"])
         self.mode.setCurrentIndex(1)
+        self.turbulence = QtWidgets.QCheckBox("Модель турбулентности k–ε")
+        self.turbulence.setChecked(True)
+        self.turbulence.setToolTip("Выключено: ламинарные уравнения Навье–Стокса, без турбулентной вязкости и переноса k/epsilon.")
+        self.energy = QtWidgets.QCheckBox("Уравнение энергии · температура")
+        self.energy.setToolTip("Перенос и теплопроводность при постоянных свойствах. Температура не меняет плотность и вязкость; без плавучести.")
+        self.temperature_inlet = self.number(1., 5000., 293.15, " K", 2)
+        self.temperature_initial = self.number(1., 5000., 293.15, " K", 2)
+        self.temperature_wall = self.number(1., 5000., 333.15, " K", 2)
+        self.thermal_wall = QtWidgets.QComboBox()
+        self.thermal_wall.addItems(["Теплоизоляция", "Заданная температура"])
+        self.heat_capacity = self.number(1., 1e6, 4182., " Дж/(кг·К)", 2)
+        self.conductivity = self.number(1e-6, 1e4, .6, " Вт/(м·К)", 6)
+        self.turbulent_prandtl = self.number(.1, 10., .85, "", 3)
+        self.heat_source = self.number(-1e10, 1e10, 0., " Вт/м³", 1)
         self.iterations = QtWidgets.QSpinBox()
         self.iterations.setRange(10, 10000)
         self.iterations.setValue(1000)
@@ -133,7 +147,18 @@ class Window(QtWidgets.QMainWindow):
                               ("Скорость входа", self.speed), ("Время расчёта", self.duration), ("Макс. шаг времени", self.time_step), ("Начальное состояние", self.initial_condition),
                               ("Длина", self.length), ("Высота области", self.height)):
             form.addRow(label, widget)
+            if widget is self.mode:
+                form.addRow(self.turbulence)
+                form.addRow(self.energy)
         left.addLayout(form)
+        self.thermal_controls = []
+        for label, control in (("Температура входа", self.temperature_inlet),
+            ("Начальная температура", self.temperature_initial), ("Стенки: теплообмен", self.thermal_wall),
+            ("Температура стенок", self.temperature_wall), ("Теплоёмкость cp", self.heat_capacity),
+            ("Теплопроводность λ", self.conductivity), ("Турбулентное Pr", self.turbulent_prandtl),
+            ("Объёмный источник тепла", self.heat_source)):
+            form.addRow(label, control)
+            self.thermal_controls.append((form.labelForField(control), control))
         self.profile_controls = []
         for label, control in (("Угол атаки", self.profile_angle), ("Хорда", self.profile_chord),
             ("Элементов профиля", self.profile_cells), ("Cl/Cd(α)", self.profile_polar),
@@ -148,12 +173,15 @@ class Window(QtWidgets.QMainWindow):
         self.nx.valueChanged.connect(self.mesh_changed)
         self.ny.valueChanged.connect(self.mesh_changed)
         self.frames.valueChanged.connect(self.update_memory)
+        self.energy.toggled.connect(self.mode_changed)
+        self.turbulence.toggled.connect(self.mode_changed)
+        self.thermal_wall.currentIndexChanged.connect(self.mode_changed)
         self.mode.currentIndexChanged.connect(self.mode_changed)
         self.scenario.currentIndexChanged.connect(self.mode_changed)
         self.profile_polar.toggled.connect(self.mode_changed)
         self.profile_chord.valueChanged.connect(self.mode_changed)
         self.update_memory()
-        self.settings = [control for _, control in self.profile_controls]+[mesh_editor_button, mesh_load_button, self.scenario, self.mode, self.iterations, self.tolerance, self.coarse,
+        self.settings = [control for _, control in self.profile_controls+self.thermal_controls]+[self.turbulence, self.energy, mesh_editor_button, mesh_load_button, self.scenario, self.mode, self.iterations, self.tolerance, self.coarse,
                          self.grid, self.nx, self.ny, self.top, self.bottom,
                          self.frames, self.speed, self.duration, self.time_step, self.initial_condition, self.length, self.height]
         self.run_button = QtWidgets.QPushButton("Рассчитать кадры")
@@ -168,7 +196,7 @@ class Window(QtWidgets.QMainWindow):
         self.info = QtWidgets.QLabel("Выберите сценарий и выполните расчёт.\n\nРазмеры и поля — в системе СИ.")
         self.info.setWordWrap(True)
         left.addWidget(self.info)
-        note = QtWidgets.QLabel("Модель: несжимаемые RANS + k–ε.\nЦель ±10% проверена только для стандартного канала со стенками. Новые геометрии и открытые границы требуют отдельного эталона.")
+        note = QtWidgets.QLabel("Несжимаемые Навье–Стокс; k–ε и энергия включаются отдельно.\nЦель ±10% проверена только для стандартного канала со стенками. Новые геометрии и открытые границы требуют отдельного эталона.")
         note.setWordWrap(True)
         note.setStyleSheet("color: #9aaec3; font-size: 12px")
         left.addWidget(note)
@@ -200,7 +228,8 @@ class Window(QtWidgets.QMainWindow):
         right = QtWidgets.QVBoxLayout()
         toolbar = QtWidgets.QHBoxLayout()
         self.field = QtWidgets.QComboBox()
-        self.field.addItems(["Скорость · м/с", "Давление · Па"])
+        self.field.addItems(["Скорость · м/с", "Давление · Па", "Температура · K"])
+        self.field.model().item(2).setEnabled(False)
         self.field.currentIndexChanged.connect(self.change_field)
         self.show_lines = QtWidgets.QCheckBox("Линии тока")
         self.show_lines.setChecked(True)
@@ -309,6 +338,12 @@ class Window(QtWidgets.QMainWindow):
         c = Config(scenario="custom" if custom else PROFILE_SCENARIO if profile else list(SCENARIOS)[self.scenario.currentIndex()],
                    mesh_path=self.custom_mesh_path if custom else None,
                    mode="steady" if self.mode.currentIndex() == 0 else "transient",
+                   turbulence=self.turbulence.isChecked(), energy=self.energy.isChecked(),
+                   heat_capacity=self.heat_capacity.value(), conductivity=self.conductivity.value(),
+                   turbulent_prandtl=self.turbulent_prandtl.value(),
+                   temperature_inlet=self.temperature_inlet.value(), temperature_initial=self.temperature_initial.value(),
+                   temperature_wall=self.temperature_wall.value(), heat_source=self.heat_source.value(),
+                   thermal_wall="adiabatic" if self.thermal_wall.currentIndex() == 0 else "isothermal",
                    max_iterations=self.iterations.value(), tolerance=self.tolerance.value(),
                    coarse_start=self.coarse.isChecked(),
                    nx=self.nx.value(), ny=self.ny.value(), frames=self.frames.value(),
@@ -333,7 +368,7 @@ class Window(QtWidgets.QMainWindow):
             widget.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self.progress.setValue(0)
-        self.info.setText("Расчёт RANS / k–ε…\nПервый запуск компилирует численные ядра.\nИнтерфейс остаётся доступен.")
+        self.info.setText(("Расчёт RANS / k–ε" if c.turbulence else "Расчёт ламинарного течения")+(" + энергия" if c.energy else "")+"…\nПервый запуск компилирует численные ядра.\nИнтерфейс остаётся доступен.")
 
     def mode_changed(self, *_):
         custom = self.scenario.currentIndex() == CUSTOM_INDEX
@@ -341,6 +376,13 @@ class Window(QtWidgets.QMainWindow):
         steady = self.mode.currentIndex() == 0
         enabled = self.process is None
         self.mode.setEnabled(enabled)
+        for label, control in self.thermal_controls:
+            label.setVisible(self.energy.isChecked())
+            control.setVisible(self.energy.isChecked())
+            control.setEnabled(enabled and self.energy.isChecked())
+        self.temperature_wall.setEnabled(enabled and self.energy.isChecked() and self.thermal_wall.currentIndex() == 1)
+        self.temperature_initial.setEnabled(enabled and self.energy.isChecked() and not steady)
+        self.turbulent_prandtl.setEnabled(enabled and self.energy.isChecked() and self.turbulence.isChecked())
         for control in (self.grid, self.nx, self.ny, self.length, self.height, self.top, self.bottom):
             control.setEnabled(enabled and not custom and not profile)
         for label, control in self.profile_controls:
@@ -351,9 +393,14 @@ class Window(QtWidgets.QMainWindow):
             control.setEnabled(enabled and profile and steady and self.profile_polar.isChecked())
         self.profile_polar.setEnabled(enabled and profile and steady)
         self.coarse.setEnabled(enabled and steady and not custom and not profile)
+        if not profile and self.last_scenario == PROFILE_INDEX:
+            self.heat_capacity.setValue(4182.)
+            self.conductivity.setValue(.6)
         if profile:
             if self.last_scenario != PROFILE_INDEX:
                 self.speed.setValue(20.)
+                self.heat_capacity.setValue(1005.)
+                self.conductivity.setValue(.0257)
                 if not steady:
                     self.duration.setValue(.025)
                 self.set_mesh(320, 160)
@@ -432,8 +479,8 @@ class Window(QtWidgets.QMainWindow):
 
     def update_memory(self, *_):
         c = Config(nx=self.nx.value(), ny=self.ny.value(), frames=self.frames.value(),
-                   mode="steady" if self.mode.currentIndex() == 0 else "transient")
-        mib = c.nx*c.ny*c.frame_count*5*4/1024**2
+                   mode="steady" if self.mode.currentIndex() == 0 else "transient", energy=self.energy.isChecked())
+        mib = c.nx*c.ny*c.frame_count*c.field_count*4/1024**2
         self.memory.setText(f"Сохранится {c.frame_count} кадров · поля {mib:.1f} МиБ."
             + ("\nSIMPLE: одно итоговое поле, анимация маркеров." if c.mode == "steady" else "\nКадры сокращены до бюджета 256 МиБ." if c.frame_count < c.frames else "")
             + ("\nКрупная сетка: расчёт существенно дольше; мелкая сетка у стенки не гарантирует точность k–ε." if c.nx*c.ny > 65536 else ""))
@@ -493,6 +540,9 @@ class Window(QtWidgets.QMainWindow):
         self.trails.setData([], [])
         self.caption.setText("Поля скорости и давления меняются во времени. Линии — мгновенные линии тока; частицы движутся по рассчитанной скорости." if self.tracers else "Стационарное поле. Маркеры показывают направление; физическое время не рассчитывается.")
         self.result = result
+        self.field.model().item(2).setEnabled(result.temperature is not None)
+        if self.field.currentIndex() == 2 and result.temperature is None:
+            self.field.setCurrentIndex(0)
         self.position = 0.
         self.stream_key = None
         self.paths = []
@@ -512,8 +562,13 @@ class Window(QtWidgets.QMainWindow):
             f"Небаланс расхода: {d['mass_imbalance']:.2e}\n"
             + (f"Изменение u между последними кадрами: {d['final_frame_velocity_change']:.2e}\n" if result.config.mode == "transient" else "")
             + ("Обратный поток на выходе: увеличьте длину канала.\n" if d['backflow'] else "")
+            + (f"Температура: {d['energy']['min_temperature_k']:.2f}…{d['energy']['max_temperature_k']:.2f} K\n"
+               f"Небаланс энергии: {d['energy']['relative_imbalance']:.2e}\n" if "energy" in d else "")
+            + ("Модель: k–ε.\n" if result.config.turbulence else "Модель: ламинарная.\n")
             + "Сходимость и точность см. в отчёте проверки.")
         c = result.config
+        self.turbulence.setChecked(c.turbulence)
+        self.energy.setChecked(c.energy)
         self.initial_condition.setCurrentIndex(0 if c.initial_condition == "uniform" else 1)
         self.mode.setCurrentIndex(0 if c.mode == "steady" else 1)
         self.iterations.setValue(c.max_iterations)
@@ -548,12 +603,19 @@ class Window(QtWidgets.QMainWindow):
         else:
             self.scenario.setCurrentIndex(list(SCENARIOS).index(c.scenario))
             self.mesh_info.setText("")
+        result_mesh_info = self.mesh_info.text()
         self.top.setCurrentIndex(0 if c.top == "wall" else 1)
         self.bottom.setCurrentIndex(0 if c.bottom == "wall" else 1)
         self.frames.setValue(c.frames)
         for control, value in ((self.speed, c.speed), (self.duration, c.duration), (self.time_step, c.time_step),
                                (self.length, c.length), (self.height, c.height)):
             control.setValue(value)
+        for name in ("heat_capacity", "conductivity", "turbulent_prandtl", "temperature_initial",
+                     "temperature_inlet", "temperature_wall", "heat_source"):
+            getattr(self, name).setValue(getattr(c, name))
+        self.thermal_wall.setCurrentIndex(0 if c.thermal_wall == "adiabatic" else 1)
+        self.mode_changed()
+        self.mesh_info.setText(result_mesh_info)
         self.set_mesh(c.nx, c.ny)
         self.image.setImage(np.zeros((c.ny, c.nx)), autoLevels=False)
         self.image.setRect(QtCore.QRectF(0, 0, c.length, c.height))
@@ -582,13 +644,13 @@ class Window(QtWidgets.QMainWindow):
         if self.result is None:
             return
         r = self.result
-        values = np.hypot(r.u, r.v) if self.field.currentIndex() == 0 else r.pressure
+        values = np.hypot(r.u, r.v) if self.field.currentIndex() == 0 else r.pressure if self.field.currentIndex() == 1 else r.temperature
         values = values[:, r.fluid]
         low, high = float(values.min()), float(values.max())
         if self.field.currentIndex() == 1:
             bound = max(abs(low), abs(high), 1e-6)
             low, high = -bound, bound
-        self.bar.setColorMap(pg.colormap.get("CET-D1" if self.field.currentIndex() == 1 else "viridis"))
+        self.bar.setColorMap(pg.colormap.get("CET-D1" if self.field.currentIndex() == 1 else "inferno" if self.field.currentIndex() == 2 else "viridis"))
         self.bar.setLevels((low, max(high, low+1e-6)))
         self.render()
 
@@ -601,7 +663,7 @@ class Window(QtWidgets.QMainWindow):
         def blend(q):
             return q[index]*(1-alpha)+q[index+1]*alpha
         u, v = blend(r.u), blend(r.v)
-        field = np.hypot(u, v) if self.field.currentIndex() == 0 else blend(r.pressure)
+        field = np.hypot(u, v) if self.field.currentIndex() == 0 else blend(r.pressure) if self.field.currentIndex() == 1 else blend(r.temperature)
         self.image.setImage(np.where(r.fluid, field, np.nan), autoLevels=False)
         self.slider.setValue(round(t/r.config.duration*10000))
         self.time_label.setText(f"{'Анимация' if r.config.mode == 'steady' else 't'} = {t:.3f} с")

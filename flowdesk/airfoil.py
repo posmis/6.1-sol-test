@@ -25,7 +25,7 @@ def profile_geometry(chord=.1, angle=4., upper=.10, lower=.06, segments=48):
     return geometry
 
 
-def coefficients(pressure, normals, lengths, wall_velocity, distances, rho, nu, speed, chord):
+def coefficients(pressure, normals, lengths, wall_velocity, distances, rho, nu, speed, chord, turbulence=True):
     """Force on the body per unit span. Normals point from fluid into the body.
 
     Pressure force = integral(p*n_fluid ds), shear force = integral(rho*u_tau²*t ds).
@@ -37,10 +37,11 @@ def coefficients(pressure, normals, lengths, wall_velocity, distances, rho, nu, 
     tangent = velocity-normals*np.sum(velocity*normals, axis=0)
     magnitude = np.linalg.norm(tangent, axis=0)
     ut = np.maximum(np.sqrt(nu*magnitude/y), 1e-9)
-    for _ in range(8):
-        log = np.log(np.maximum(9.8*y*ut/nu, 1.01))
-        ut = np.maximum(ut-(ut*log/.41-magnitude)/((log+1)/.41), 1e-9)
-    ut = np.where(y*ut/nu > 11.06, ut, np.sqrt(nu*magnitude/y))
+    if turbulence:
+        for _ in range(8):
+            log = np.log(np.maximum(9.8*y*ut/nu, 1.01))
+            ut = np.maximum(ut-(ut*log/.41-magnitude)/((log+1)/.41), 1e-9)
+        ut = np.where(y*ut/nu > 11.06, ut, np.sqrt(nu*magnitude/y))
     pressure_force = np.sum(normals*pressure*lengths, axis=1)
     shear_force = np.sum(rho*ut**2*lengths*tangent/np.maximum(magnitude, 1e-12), axis=1)
     force = pressure_force+shear_force

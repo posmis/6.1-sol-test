@@ -102,7 +102,7 @@ def warm_start(solver, cancel, progress):
     if not c.coarse_start or factor <= 1.5:
         return None
     coarse_config = replace(c, nx=max(16, round(c.nx/factor)), ny=max(8, round(c.ny/factor)),
-                            coarse_start=False, max_iterations=min(c.max_iterations, 200),
+                            coarse_start=False, energy=False, max_iterations=min(c.max_iterations, 200),
                             tolerance=max(c.tolerance, 5e-4))
     coarse = Solver(coarse_config)
     result = solve(coarse, cancel=cancel,
@@ -192,19 +192,22 @@ def solve(s, progress=None, cancel=None):
         s.u *= s.um
         s.v *= s.vm
         s.p += .25*correction
-        production = np.minimum(nut*(2*dux**2+2*dvy**2+(duy+dvx)**2), 10*s.e)
-        production[s.wall] = wp[s.wall]
-        oldk = np.maximum(s.k, 1e-10)
-        for key, q, diffusion, sink, source, fixed, inlet, scale in (
-            ("k", s.k, c.nu+nut, s.e/oldk, production, np.maximum(kw, 1e-10), s.kin, s.kin*c.speed/c.length),
-            ("e", s.e, c.nu+nut/1.3, 1.92*s.e/oldk, 1.44*production*s.e/oldk,
-             np.maximum(ew, 1e-10), s.ein, s.ein*c.speed/c.length)):
-            a, b = operator(f, diffusion, uc, vc, sink, source, skind, fixed, dx, dy,
-                            conservative=True, u=s.u, v=s.v, inlet=inlet)
-            residual[key] = defect(a, q[f], b, scale)
-            new, _ = relaxed_solve(linear, a, b, q, f, skind, .7, key)
-            new[f] = np.maximum(new[f], 1e-10)
-            setattr(s, key, new)
+        if c.turbulence:
+            production = np.minimum(nut*(2*dux**2+2*dvy**2+(duy+dvx)**2), 10*s.e)
+            production[s.wall] = wp[s.wall]
+            oldk = np.maximum(s.k, 1e-10)
+            for key, q, diffusion, sink, source, fixed, inlet, scale in (
+                ("k", s.k, c.nu+nut, s.e/oldk, production, np.maximum(kw, 1e-10), s.kin, s.kin*c.speed/c.length),
+                ("e", s.e, c.nu+nut/1.3, 1.92*s.e/oldk, 1.44*production*s.e/oldk,
+                 np.maximum(ew, 1e-10), s.ein, s.ein*c.speed/c.length)):
+                a, b = operator(f, diffusion, uc, vc, sink, source, skind, fixed, dx, dy,
+                                conservative=True, u=s.u, v=s.v, inlet=inlet)
+                residual[key] = defect(a, q[f], b, scale)
+                new, _ = relaxed_solve(linear, a, b, q, f, skind, .7, key)
+                new[f] = np.maximum(new[f], 1e-10)
+                setattr(s, key, new)
+        else:
+            residual.update(k=0., e=0.)
         residual["continuity"] = float(np.max(abs(s.divergence()[f]))*c.length/c.speed)
         if not all(np.isfinite(q).all() for q in (s.u, s.v, s.p, s.k, s.e)):
             raise FloatingPointError("SIMPLE diverged")
@@ -215,6 +218,11 @@ def solve(s, progress=None, cancel=None):
         if iteration >= 10 and successful >= 3:
             converged = True
             break
+    temperature = None
+    if c.energy:
+        from .thermal import structured_steady
+        structured_steady(s, linear)
+        temperature = np.repeat(np.where(f, s.temperature, 0.)[None].astype(np.float32), 2, axis=0)
     uc, vc = s.centres()
     static = (s.p-2*s.k/3+2*np.mean(s.k[:, -1][f[:, -1]])/3)*c.rho
     fields = [np.repeat(np.where(f, q, 0)[None].astype(np.float32), 2, axis=0)
@@ -231,4 +239,7 @@ def solve(s, progress=None, cancel=None):
         pressure_drop_pa=float(np.mean(static[:, 0][f[:, 0]])-np.mean(static[:, -1][f[:, -1]])),
         backflow=bool(np.any(s.u[:, -1] < 0)),
         note="Two identical final fields for playback; time is animation time, not a simulated transient.")
-    return Result(c, np.array([0., c.duration]), *fields, f.copy(), diagnostics)
+    diagnostics["turbulence_model"] = "k-epsilon" if c.turbulence else "laminar"
+    if c.energy:
+        diagnostics["energy"] = s.energy_budget
+    return Result(c, np.array([0., c.duration]), *fields, f.copy(), diagnostics, temperature=temperature)

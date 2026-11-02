@@ -105,7 +105,7 @@ def solve(config, progress=None, cancel=None):
     inlet, wall = tags == "inlet", tags == "wall"
     opened = (tags == "outlet") | (tags == "open")
     exterior = ~interior
-    kin = 1.5*(c.speed*c.intensity)**2
+    kin = 1.5*(c.speed*c.intensity)**2 if c.turbulence else 0.
     reference_length = c.profile_chord if c.scenario == PROFILE_SCENARIO else min(c.length, c.height)
     ein = .09**.75*kin**1.5/(.07*reference_length)
     p, pc = CellVariable(mesh=mesh, value=0.), CellVariable(mesh=mesh, value=0.)
@@ -172,6 +172,10 @@ def solve(config, progress=None, cancel=None):
         u.setValue(u.value-pc.grad[0].value)
         v.setValue(v.value-pc.grad[1].value)
         pc.setValue(0.)
+    from .thermal import NativeThermal
+    thermal = NativeThermal(c, mesh, tags, velocity, owner, normals, face_area, area) if c.energy else None
+    temperature = np.empty((c.frame_count, c.ny, c.nx), np.float32) if c.energy else None
+    energy_history = []
     initial_divergence = float(np.max(abs(velocity.divergence.value)))
     times = np.linspace(0., c.duration, c.frame_count)
     cell_ids, fluid = raster_sampler(project, c.nx, c.ny)
@@ -181,6 +185,8 @@ def solve(config, progress=None, cancel=None):
         static = (p.value-2*k.value/3+2*ref/3)*c.rho
         for field, value in zip(frames, (u.value, v.value, static, k.value, e.value)):
             field[index] = np.where(fluid, np.asarray(value)[cell_ids], 0.)
+        if thermal is not None:
+            temperature[index] = np.where(fluid, thermal.temperature[cell_ids], 0.)
     snapshot(0)
     if transient:
         # Backward Euler, bounded upwind transport; time resolution is independent
@@ -201,6 +207,8 @@ def solve(config, progress=None, cancel=None):
         if transient:
             for variable in (u, v, k, e):
                 variable.updateOld()
+            if thermal is not None:
+                thermal.theta.updateOld()
         consecutive, converged = 0, False
         for iteration in range(1, c.max_iterations+1):
             if cancel is not None and cancel.is_set():
@@ -213,11 +221,12 @@ def solve(config, progress=None, cancel=None):
             tangent = uv-nw*np.sum(nw*uv, axis=0)
             speed = np.linalg.norm(tangent, axis=0)
             ut = np.maximum(np.sqrt(c.nu*speed/distances), 1e-9)
-            for _ in range(8):
-                log = np.log(np.maximum(9.8*distances*ut/c.nu, 1.01))
-                ut = np.maximum(ut-(ut*log/.41-speed)/((log+1)/.41), 1e-9)
-            ut = np.where(distances*ut/c.nu > 11.06, ut, np.sqrt(c.nu*speed/distances))
-            gamma = ut**2/np.maximum(speed, 1e-12)*face_area[wf]/area[wc]
+            if c.turbulence:
+                for _ in range(8):
+                    log = np.log(np.maximum(9.8*distances*ut/c.nu, 1.01))
+                    ut = np.maximum(ut-(ut*log/.41-speed)/((log+1)/.41), 1e-9)
+                ut = np.where(distances*ut/c.nu > 11.06, ut, np.sqrt(c.nu*speed/distances))
+            gamma = ((ut**2/np.maximum(speed, 1e-12)) if c.turbulence else c.nu/distances)*face_area[wf]/area[wc]
             dragx = np.bincount(wc, weights=gamma*(1-nw[0]**2), minlength=nc)
             dragy = np.bincount(wc, weights=gamma*(1-nw[1]**2), minlength=nc)
             cross = np.bincount(wc, weights=gamma*nw[0]*nw[1], minlength=nc)
@@ -248,25 +257,28 @@ def solve(config, progress=None, cancel=None):
             p.setValue(p.value+(.5 if transient else .25)*pc.value)
             u.setValue(u.value-d.value*pc.grad[0].value)
             v.setValue(v.value-d.value*pc.grad[1].value)
-            kw = np.bincount(wc, weights=face_area[wf]*ut**2/.3, minlength=nc)/np.maximum(wall_weight, 1e-20)
-            ew = np.bincount(wc, weights=face_area[wf]*ut**3/(.41*distances), minlength=nc)/np.maximum(wall_weight, 1e-20)
-            prod = np.minimum(nut*(2*ug[0]**2+2*vg[1]**2+(ug[1]+vg[0])**2), 10*e.value)
-            prod[wall_cells] = ew[wall_cells]
-            normal_flux = np.sum(velocity.value*normals, axis=0)*face_area
-            entering = opened & (normal_flux < 0)
-            backflow_rate = np.bincount(owner[entering], weights=-normal_flux[entering], minlength=nc)/area
-            oldk = np.maximum(k.value, 1e-10)
-            # Replace zero-gradient incoming scalar flux F*q_cell by F*q_ambient.
-            production.setValue(prod+backflow_rate*kin)
-            eproduction.setValue(1.44*prod*e.value/oldk+backflow_rate*ein)
-            ksink.setValue(e.value/oldk+backflow_rate)
-            esink.setValue(1.92*e.value/oldk+backflow_rate)
-            residual_k, _ = implicit_solve(linear, keq, k, "k", relaxation, kin*c.speed/c.length,
-                                           (wall_cells, np.maximum(kw, 1e-10)), dt=dt)
-            residual_e, _ = implicit_solve(linear, eeq, e, "e", relaxation, ein*c.speed/c.length,
-                                           (wall_cells, np.maximum(ew, 1e-10)), dt=dt)
-            k.setValue(np.maximum(k.value, 1e-10))
-            e.setValue(np.maximum(e.value, 1e-10))
+            if c.turbulence:
+                kw = np.bincount(wc, weights=face_area[wf]*ut**2/.3, minlength=nc)/np.maximum(wall_weight, 1e-20)
+                ew = np.bincount(wc, weights=face_area[wf]*ut**3/(.41*distances), minlength=nc)/np.maximum(wall_weight, 1e-20)
+                prod = np.minimum(nut*(2*ug[0]**2+2*vg[1]**2+(ug[1]+vg[0])**2), 10*e.value)
+                prod[wall_cells] = ew[wall_cells]
+                normal_flux = np.sum(velocity.value*normals, axis=0)*face_area
+                entering = opened & (normal_flux < 0)
+                backflow_rate = np.bincount(owner[entering], weights=-normal_flux[entering], minlength=nc)/area
+                oldk = np.maximum(k.value, 1e-10)
+                # Replace zero-gradient incoming scalar flux F*q_cell by F*q_ambient.
+                production.setValue(prod+backflow_rate*kin)
+                eproduction.setValue(1.44*prod*e.value/oldk+backflow_rate*ein)
+                ksink.setValue(e.value/oldk+backflow_rate)
+                esink.setValue(1.92*e.value/oldk+backflow_rate)
+                residual_k, _ = implicit_solve(linear, keq, k, "k", relaxation, kin*c.speed/c.length,
+                                               (wall_cells, np.maximum(kw, 1e-10)), dt=dt)
+                residual_e, _ = implicit_solve(linear, eeq, e, "e", relaxation, ein*c.speed/c.length,
+                                               (wall_cells, np.maximum(ew, 1e-10)), dt=dt)
+                k.setValue(np.maximum(k.value, 1e-10))
+                e.setValue(np.maximum(e.value, 1e-10))
+            else:
+                residual_k = residual_e = 0.
             continuity = float(np.max(abs(velocity.divergence.value))*c.length/c.speed)
             residual = dict(u=residual_u, v=residual_v, k=residual_k, e=residual_e, continuity=continuity)
             history.append(dict(iteration=total_iterations+iteration, time=physical_time, **residual))
@@ -274,7 +286,7 @@ def solve(config, progress=None, cancel=None):
                 from .airfoil import coefficients
                 forces = coefficients((p.value[wc]-2*k.value[wc]/3)*c.rho, nw, face_area[wf],
                                       np.vstack([u.value[wc], v.value[wc]]), distances,
-                                      c.rho, c.nu, c.speed, c.profile_chord)
+                                      c.rho, c.nu, c.speed, c.profile_chord, turbulence=c.turbulence)
                 aero_history.append(dict(iteration=iteration, **forces))
             consecutive = consecutive+1 if max(residual.values()) < c.tolerance else 0
             if progress and not transient:
@@ -283,6 +295,10 @@ def solve(config, progress=None, cancel=None):
                 converged = True
                 break
         total_iterations += iteration
+        if thermal is not None and (converged or not transient):
+            nut = np.minimum(.09*np.asarray(k.value)**2/np.maximum(e.value, 1e-12), .1*c.speed*reference_length)
+            budget = thermal.advance(linear, nut, dt)
+            energy_history.append(dict(time=physical_time, **budget))
         if transient:
             if not converged:
                 raise RuntimeError(f"Шаг времени t={physical_time:.6g} с не сошёлся: {residual}. "
@@ -295,7 +311,7 @@ def solve(config, progress=None, cancel=None):
             if c.scenario == PROFILE_SCENARIO:
                 from .airfoil import coefficients
                 forces = coefficients((p.value[wc]-2*k.value[wc]/3)*c.rho, normals[:, wf], face_area[wf],
-                    np.vstack([u.value[wc], v.value[wc]]), distances, c.rho, c.nu, c.speed, c.profile_chord)
+                    np.vstack([u.value[wc], v.value[wc]]), distances, c.rho, c.nu, c.speed, c.profile_chord, turbulence=c.turbulence)
                 aero_history.append(dict(iteration=total_iterations, time=physical_time, **forces))
             if save_frame:
                 snapshot(frame_index)
@@ -312,7 +328,9 @@ def solve(config, progress=None, cancel=None):
         fields = frames
     else:
         fields, fluid = rasterize(project, native_values, c.nx, c.ny)
-    diagnostics = dict(mode=c.mode, backend="FiPy polygon FVM / backward Euler URANS + SIMPLE Rhie-Chow" if transient else "FiPy polygon FVM / SIMPLE Rhie-Chow", converged=converged,
+    if thermal is not None and not transient:
+        temperature[:] = np.where(fluid, thermal.temperature[cell_ids], 0.)
+    diagnostics = dict(mode=c.mode, backend="FiPy polygon FVM / backward Euler + SIMPLE Rhie-Chow" if transient else "FiPy polygon FVM / SIMPLE Rhie-Chow", converged=converged,
         iterations=total_iterations, residuals=residual, residual_history=history, coarse_start=None,
         wall_seconds=time.perf_counter()-start, steps=len(step_history), stored_frames=len(times), time_history=step_history,
         max_divergence=continuity*c.speed/c.length,
@@ -326,11 +344,15 @@ def solve(config, progress=None, cancel=None):
     native = dict(points=project.points, cells=project.cells, centres=np.asarray(mesh.cellCenters).T,
                   boundary_edges=project.boundary_edges, boundary_tags=project.boundary_tags,
                   **dict(zip(("u", "v", "pressure", "k", "epsilon"), native_values)))
+    diagnostics["turbulence_model"] = "k-epsilon" if c.turbulence else "laminar"
+    if thermal is not None:
+        native["temperature"] = thermal.temperature.copy()
+        diagnostics["energy"] = dict(history=energy_history, **energy_history[-1])
     if aero_history:
         diagnostics["aerodynamics"] = dict(chord_m=c.profile_chord, angle_deg=c.profile_angle,
             reference_speed_m_s=c.speed, reference_density=c.rho,
             reynolds_chord=c.speed*c.profile_chord/c.nu, history=aero_history,
             final={key: value for key, value in aero_history[-1].items() if key != "iteration"},
-            note="Forces on profile only, per unit span; pressure plus equilibrium wall shear. Not wind-tunnel validated.")
+            note="Forces on profile only, per unit span; pressure plus wall shear (log law for k-epsilon, viscous gradient for laminar). Not wind-tunnel validated.")
         diagnostics["reynolds"] = c.speed*c.profile_chord/c.nu
-    return Result(c, times, *fields, fluid, diagnostics, native=native)
+    return Result(c, times, *fields, fluid, diagnostics, native=native, temperature=temperature)
