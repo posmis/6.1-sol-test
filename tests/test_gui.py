@@ -4,7 +4,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import time
 import numpy as np
 from PySide6 import QtCore, QtWidgets
-from flowdesk.gui import Window
+from flowdesk.gui import Window, CUSTOM_INDEX
 
 _app = None  # Keep QApplication alive until all QGraphicsItem wrappers are gone.
 
@@ -16,7 +16,7 @@ def test_desktop_calculate_play_save_load(tmp_path):
     window = Window()
     window.show()
     window.mode.setCurrentIndex(1)
-    assert window.scenario.count() == 7
+    assert window.scenario.count() == 8
     window.grid.setCurrentIndex(6)
     assert window.nx.value() == window.ny.value() == 1024
     assert "12 кадров" in window.memory.text()
@@ -132,7 +132,7 @@ def test_mesh_editor_to_desktop_calculation(tmp_path, monkeypatch):
         monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName", lambda *a, **kw: (str(path), ""))
         editor.use()
         assert path.exists()
-        assert window.scenario.currentIndex() == 6
+        assert window.scenario.currentIndex() == CUSTOM_INDEX
         assert window.mode.currentIndex() == 0
         assert not window.nx.isEnabled()
         window.iterations.setValue(250)

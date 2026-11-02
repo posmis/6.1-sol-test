@@ -21,7 +21,24 @@ jobs:
       - run: python -m pytest -q
       - run: python -m flowdesk.benchmark --steady --output results/validation.json
       - run: python -m flowdesk.mesh_check --output results/custom-mesh-validation.json
+      - run: python -m flowdesk.profile_check --cells 400 --angles 4 --output results/profile-validation.json
       - uses: actions/upload-artifact@v4
         with:
           name: validation
           path: results/*.json
+  windows-python314:
+    runs-on: windows-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+      MPLBACKEND: Agg
+      OPENBLAS_NUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: requirements-lock.txt
+      - run: python -m pip install -r requirements-lock.txt
+      - run: python -m pip install --no-deps -e .
+      - run: python -m pytest -q tests/test_fipy_compat.py tests/test_meshing.py

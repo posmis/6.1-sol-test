@@ -18,8 +18,14 @@ def build_worker(geometry, settings, messages):
         result = generate(Geometry(**geometry), MeshSettings(**settings),
                           lambda i, n: messages.put(("progress", (i, n))))
         messages.put(("result", result))
-    except Exception:
-        messages.put(("error", traceback.format_exc()))
+    except Exception as exc:
+        from .error_report import error_payload
+        text = traceback.format_exc()
+        try:
+            payload = error_payload(text, summary=f"{type(exc).__name__}: {exc}")
+        except Exception:
+            payload = text
+        messages.put(("error", payload))
 
 
 class MeshEditor(QtWidgets.QMainWindow):
@@ -305,7 +311,8 @@ class MeshEditor(QtWidgets.QMainWindow):
                     if kind == "result":
                         self.accept_mesh(value)
                     else:
-                        QtWidgets.QMessageBox.warning(self, "Ошибка построения", value)
+                        from .error_report import ErrorDialog
+                        ErrorDialog("Ошибка построения сетки", value, self).exec()
                     break
         except queue.Empty:
             if self.process.exitcode is not None:

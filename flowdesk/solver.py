@@ -8,7 +8,7 @@ from dataclasses import dataclass, asdict
 import json
 import numpy as np
 from threadpoolctl import threadpool_limits
-from .scenarios import SCENARIOS, geometry
+from .scenarios import SCENARIOS, PROFILE_SCENARIO, geometry
 from .pressure import PressureSolver
 from .kernels import diffuse as diffusion, advect as upwind, scalar_transport
 
@@ -33,6 +33,13 @@ class Config:
     tolerance: float = 1e-4
     coarse_start: bool = True
     mesh_path: str | None = None
+    profile_angle: float = 4.
+    profile_chord: float = .1
+    profile_cells: int = 800
+    profile_sweep: tuple = ()
+
+    def __post_init__(self):
+        object.__setattr__(self, "profile_sweep", tuple(self.profile_sweep))
 
     @property
     def frame_count(self):
@@ -42,8 +49,16 @@ class Config:
         return min(self.frames, max(2, (256*1024**2)//(self.nx*self.ny*5*4)))
 
     def validate(self):
-        if self.scenario not in SCENARIOS and self.scenario != "custom":
+        if self.scenario not in SCENARIOS and self.scenario not in ("custom", PROFILE_SCENARIO):
             raise ValueError("Unknown scenario")
+        if self.scenario == PROFILE_SCENARIO and self.mode != "steady":
+            raise ValueError("Продувка профиля использует стационарный SIMPLE")
+        if (not np.isfinite(self.profile_angle) or not -30 <= self.profile_angle <= 30
+            or not np.isfinite(self.profile_chord) or not .001 <= self.profile_chord <= 10
+            or not isinstance(self.profile_cells, int) or not 400 <= self.profile_cells <= 30000
+            or len(self.profile_sweep) > 21
+            or any(not np.isfinite(a) or not -30 <= a <= 30 for a in self.profile_sweep)):
+            raise ValueError("Некорректные параметры профиля: угол ±30°, хорда 0.001…10 м, сетка 400…30000")
         if self.scenario == "custom" and (not self.mesh_path or self.mode != "steady"):
             raise ValueError("Для своей сетки нужен файл .flowmesh и стационарный SIMPLE")
         if not (isinstance(self.nx, int) and isinstance(self.ny, int)
@@ -122,7 +137,7 @@ class Solver:
     def __init__(self, config=Config()):
         config.validate()
         self.c = c = config
-        if c.scenario == "custom":
+        if c.scenario in ("custom", PROFILE_SCENARIO):
             return
         self.dx, self.dy = c.length/c.nx, c.height/c.ny
         self.fluid = geometry(c)
@@ -260,6 +275,9 @@ class Solver:
 
     @threadpool_limits.wrap(limits=1, user_api="blas")
     def run(self, progress=None, cancel=None):
+        if self.c.scenario == PROFILE_SCENARIO:
+            from .airfoil import solve_profile
+            return solve_profile(self.c, progress, cancel)
         if self.c.scenario == "custom":
             from .unstructured import solve
             return solve(self.c, progress, cancel)

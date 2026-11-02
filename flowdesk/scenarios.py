@@ -1,6 +1,9 @@
 """Built-in geometries. Obstacles are closed solids, including at open outer edges."""
 import numpy as np
 
+PROFILE_SCENARIO = "elliptic_profile"
+PROFILE_LABEL = "Продувка · несимметричный эллиптический профиль"
+
 SCENARIOS = {
     "channel": "Прямой канал",
     "step": "Обратная ступенька",

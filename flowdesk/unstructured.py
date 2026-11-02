@@ -13,6 +13,7 @@ from scipy.sparse import diags
 from threadpoolctl import threadpool_limits
 from .meshing import MeshProject
 from .steady import LinearSolves
+from .scenarios import PROFILE_SCENARIO
 
 
 def fipy_mesh(project):
@@ -81,7 +82,8 @@ def rasterize(project, values, nx, ny):
 def solve(config, progress=None, cancel=None):
     os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir())/"flowdesk-mpl"))
     os.environ.setdefault("MPLBACKEND", "Agg")
-    from fipy import CellVariable, FaceVariable, DiffusionTerm, DiffusionTermCorrection, UpwindConvectionTerm, ImplicitSourceTerm
+    from fipy import CellVariable, FaceVariable, DiffusionTerm, UpwindConvectionTerm, ImplicitSourceTerm
+    from .fipy_compat import NamedDiffusionTermCorrection as DiffusionTermCorrection
     from fipy.variables.faceGradVariable import _FaceGradVariable
     from .solver import Result
     start = time.perf_counter()
@@ -100,9 +102,10 @@ def solve(config, progress=None, cancel=None):
     opened = (tags == "outlet") | (tags == "open")
     exterior = ~interior
     kin = 1.5*(c.speed*c.intensity)**2
-    ein = .09**.75*kin**1.5/(.07*min(c.length, c.height))
+    reference_length = c.profile_chord if c.scenario == PROFILE_SCENARIO else min(c.length, c.height)
+    ein = .09**.75*kin**1.5/(.07*reference_length)
     p, pc = CellVariable(mesh=mesh, value=0.), CellVariable(mesh=mesh, value=0.)
-    u, v = CellVariable(mesh=mesh, value=c.speed), CellVariable(mesh=mesh, value=0.)
+    u, v = CellVariable(mesh=mesh, value=float(c.speed)), CellVariable(mesh=mesh, value=0.)
     k, e = CellVariable(mesh=mesh, value=kin), CellVariable(mesh=mesh, value=ein)
     velocity = FaceVariable(mesh=mesh, rank=1, value=0.)
     inlet_velocity = -normals*c.speed
@@ -138,6 +141,7 @@ def solve(config, progress=None, cancel=None):
     wall_weight = np.bincount(wc, weights=face_area[wf], minlength=nc)
     linear = LinearSolves(cancel)
     history, consecutive, converged = [], 0, False
+    aero_history = []
     # Inward normal velocity at all inlet faces, not an assumed horizontal CAD orientation.
     velocity[0] = u.arithmeticFaceValue
     velocity[1] = v.arithmeticFaceValue
@@ -146,7 +150,7 @@ def solve(config, progress=None, cancel=None):
     for iteration in range(1, c.max_iterations+1):
         if cancel is not None and cancel.is_set():
             raise InterruptedError("Calculation cancelled")
-        nut = np.minimum(.09*np.asarray(k.value)**2/np.maximum(e.value, 1e-12), .1*c.speed*min(c.length, c.height))
+        nut = np.minimum(.09*np.asarray(k.value)**2/np.maximum(e.value, 1e-12), .1*c.speed*reference_length)
         nu.setValue(c.nu+nut)
         nudiffe.setValue(c.nu+nut/1.3)
         uv = np.vstack([u.value[wc], v.value[wc]])
@@ -211,6 +215,12 @@ def solve(config, progress=None, cancel=None):
         continuity = float(np.max(abs(velocity.divergence.value))*c.length/c.speed)
         residual = dict(u=residual_u, v=residual_v, k=residual_k, e=residual_e, continuity=continuity)
         history.append(dict(iteration=iteration, **residual))
+        if c.scenario == PROFILE_SCENARIO:
+            from .airfoil import coefficients
+            forces = coefficients((p.value[wc]-2*k.value[wc]/3)*c.rho, nw, face_area[wf],
+                                  np.vstack([u.value[wc], v.value[wc]]), distances,
+                                  c.rho, c.nu, c.speed, c.profile_chord)
+            aero_history.append(dict(iteration=iteration, **forces))
         consecutive = consecutive+1 if max(residual.values()) < c.tolerance else 0
         if progress:
             progress(iteration, c.max_iterations, 0.)
@@ -230,12 +240,19 @@ def solve(config, progress=None, cancel=None):
         wall_seconds=time.perf_counter()-start, steps=0, stored_frames=2,
         max_divergence=continuity*c.speed/c.length,
         mass_imbalance=float(abs(flux[exterior].sum())/max(inflow, 1e-12)),
-        side_flow_m2_s=0., pressure_solver="native polygon SIMPLE / sparse-LU + AMG",
+        side_flow_m2_s=float(flux[tags == "open"].sum()), pressure_solver="native polygon SIMPLE / sparse-LU + AMG",
         final_frame_velocity_change=0., reynolds=c.speed*min(c.height, c.length)/c.nu,
-        pressure_drop_pa=inlet_p-outlet_p, backflow=bool(np.any(flux[opened] < -1e-10)),
+        pressure_drop_pa=inlet_p-outlet_p, backflow=bool(np.any(flux[tags == "outlet"] < -1e-10)),
         mesh_cells=nc, mesh_nodes=len(project.points), mesh_statistics=project.statistics,
         note="Solved on native triangles/quads. Raster is display only. Pressure accuracy for imported geometries is not reference-validated.")
     native = dict(points=project.points, cells=project.cells, centres=np.asarray(mesh.cellCenters).T,
                   boundary_edges=project.boundary_edges, boundary_tags=project.boundary_tags,
                   **dict(zip(("u", "v", "pressure", "k", "epsilon"), native_values)))
+    if aero_history:
+        diagnostics["aerodynamics"] = dict(chord_m=c.profile_chord, angle_deg=c.profile_angle,
+            reference_speed_m_s=c.speed, reference_density=c.rho,
+            reynolds_chord=c.speed*c.profile_chord/c.nu, history=aero_history,
+            final={key: value for key, value in aero_history[-1].items() if key != "iteration"},
+            note="Forces on profile only, per unit span; pressure plus equilibrium wall shear. Not wind-tunnel validated.")
+        diagnostics["reynolds"] = c.speed*c.profile_chord/c.nu
     return Result(c, np.array([0., c.duration]), *fields, fluid, diagnostics, native=native)

@@ -10,7 +10,10 @@ from PySide6 import QtCore, QtWidgets
 import pyqtgraph as pg
 from .solver import Config, Result, Solver
 from .visualization import streamlines
-from .scenarios import SCENARIOS
+from .scenarios import SCENARIOS, PROFILE_SCENARIO, PROFILE_LABEL
+
+PROFILE_INDEX = len(SCENARIOS)
+CUSTOM_INDEX = len(SCENARIOS)+1
 
 GRID_PRESETS = [(64, 16), (96, 24), (144, 36), (256, 64), (512, 128),
                 (1024, 256), (1024, 1024)]
@@ -25,8 +28,14 @@ def calculate(config, messages, cancel):
         messages.put(("result", result))
     except InterruptedError:
         messages.put(("cancelled", None))
-    except Exception:
-        messages.put(("error", traceback.format_exc()))
+    except Exception as exc:
+        from .error_report import error_payload
+        text = traceback.format_exc()
+        try:
+            payload = error_payload(text, config, f"{type(exc).__name__}: {exc}")
+        except Exception:
+            payload = text
+        messages.put(("error", payload))
 
 
 class Window(QtWidgets.QMainWindow):
@@ -38,6 +47,8 @@ class Window(QtWidgets.QMainWindow):
         self.process = None
         self.custom_mesh_path = None
         self.mesh_editors = []
+        self.aero_dialogs = []
+        self.last_scenario = 0
         self.playing = False
         self.position = 0.
         self.paths = []
@@ -54,7 +65,7 @@ class Window(QtWidgets.QMainWindow):
         title = QtWidgets.QLabel("FLOWDESK")
         title.setStyleSheet("font-size: 27px; font-weight: 700; color: #5eead4")
         left.addWidget(title)
-        left.addWidget(QtWidgets.QLabel("Лаборатория течений · вода · 2D"))
+        left.addWidget(QtWidgets.QLabel("Лаборатория течений · 2D RANS"))
         mesh_editor_button = QtWidgets.QPushButton("Геометрия и сетка (DXF)…")
         mesh_editor_button.clicked.connect(self.open_mesh_editor)
         mesh_load_button = QtWidgets.QPushButton("Загрузить свою сетку .flowmesh…")
@@ -65,7 +76,7 @@ class Window(QtWidgets.QMainWindow):
         self.mesh_info.setWordWrap(True)
         left.addWidget(self.mesh_info)
         self.scenario = QtWidgets.QComboBox()
-        self.scenario.addItems(list(SCENARIOS.values())+["Своя модель (DXF / .flowmesh)"])
+        self.scenario.addItems(list(SCENARIOS.values())+[PROFILE_LABEL, "Своя модель (DXF / .flowmesh)"])
         self.mode = QtWidgets.QComboBox()
         self.mode.addItems(["Стационарный · SIMPLE", "Нестационарный"])
         self.iterations = QtWidgets.QSpinBox()
@@ -90,7 +101,17 @@ class Window(QtWidgets.QMainWindow):
         for boundary in (self.top, self.bottom):
             boundary.addItems(["Стенка", "Открытая (не стенка)"])
             boundary.setToolTip("Открытая: механическое давление 0; жидкость может входить и выходить. Не свободная поверхность.")
-        self.speed = self.number(.1, 5, 1, " м/с")
+        self.speed = self.number(.1, 100, 1, " м/с")
+        self.profile_angle = self.number(-30, 30, 4., " °", 1)
+        self.profile_chord = self.number(.01, 2, .1, " м", 3)
+        self.profile_cells = QtWidgets.QSpinBox()
+        self.profile_cells.setRange(400, 30000)
+        self.profile_cells.setValue(800)
+        self.profile_polar = QtWidgets.QCheckBox("Поляра по углу атаки (серия расчётов)")
+        self.profile_polar.setChecked(True)
+        self.polar_min = self.number(-30, 30, -4., " °", 1)
+        self.polar_max = self.number(-30, 30, 8., " °", 1)
+        self.polar_step = self.number(.5, 30, 4., " °", 1)
         self.duration = self.number(.2, 10, 1.2, " с")
         self.length = self.number(.1, 3, .6, " м")
         self.height = self.number(.01, .2, .04, " м", 3)
@@ -105,6 +126,12 @@ class Window(QtWidgets.QMainWindow):
                               ("Длина", self.length), ("Высота области", self.height)):
             form.addRow(label, widget)
         left.addLayout(form)
+        self.profile_controls = []
+        for label, control in (("Угол атаки", self.profile_angle), ("Хорда", self.profile_chord),
+            ("Элементов профиля", self.profile_cells), ("Cl/Cd(α)", self.profile_polar),
+            ("Начальный α", self.polar_min), ("Конечный α", self.polar_max), ("Шаг α", self.polar_step)):
+            form.addRow(label, control)
+            self.profile_controls.append((form.labelForField(control), control))
         self.duration_caption = form.labelForField(self.duration)
         self.memory = QtWidgets.QLabel()
         self.memory.setWordWrap(True)
@@ -115,8 +142,10 @@ class Window(QtWidgets.QMainWindow):
         self.frames.valueChanged.connect(self.update_memory)
         self.mode.currentIndexChanged.connect(self.mode_changed)
         self.scenario.currentIndexChanged.connect(self.mode_changed)
+        self.profile_polar.toggled.connect(self.mode_changed)
+        self.profile_chord.valueChanged.connect(self.mode_changed)
         self.update_memory()
-        self.settings = [mesh_editor_button, mesh_load_button, self.scenario, self.mode, self.iterations, self.tolerance, self.coarse,
+        self.settings = [control for _, control in self.profile_controls]+[mesh_editor_button, mesh_load_button, self.scenario, self.mode, self.iterations, self.tolerance, self.coarse,
                          self.grid, self.nx, self.ny, self.top, self.bottom,
                          self.frames, self.speed, self.duration, self.length, self.height]
         self.run_button = QtWidgets.QPushButton("Рассчитать кадры")
@@ -144,6 +173,10 @@ class Window(QtWidgets.QMainWindow):
         self.residual_button.setEnabled(False)
         self.residual_button.clicked.connect(self.show_residuals)
         left.addWidget(self.residual_button)
+        self.aero_button = QtWidgets.QPushButton("Графики Cl / Cd / Cl/Cd…")
+        self.aero_button.setEnabled(False)
+        self.aero_button.clicked.connect(self.show_aerodynamics)
+        left.addWidget(self.aero_button)
         left.addWidget(save)
         left.addWidget(load)
         self.native_export = QtWidgets.QPushButton("Поля на исходной сетке (.vtu)…")
@@ -173,6 +206,11 @@ class Window(QtWidgets.QMainWindow):
         toolbar.addWidget(self.field)
         toolbar.addWidget(self.show_lines)
         toolbar.addWidget(equal_scale)
+        self.aero_toolbar = QtWidgets.QPushButton("Cl / Cd")
+        self.aero_toolbar.setToolTip("История Cl, Cd, Cl/Cd и поляра по углам атаки")
+        self.aero_toolbar.setEnabled(False)
+        self.aero_toolbar.clicked.connect(self.show_aerodynamics)
+        toolbar.addWidget(self.aero_toolbar)
         toolbar.addStretch()
         toolbar.addWidget(QtWidgets.QLabel("Воспроизведение"))
         toolbar.addWidget(self.rate)
@@ -242,12 +280,22 @@ class Window(QtWidgets.QMainWindow):
     def start(self):
         if self.process is not None:
             return
-        custom = self.scenario.currentIndex() == len(SCENARIOS)
+        custom = self.scenario.currentIndex() == CUSTOM_INDEX
+        profile = self.scenario.currentIndex() == PROFILE_INDEX
         if custom and not self.custom_mesh_path:
             self.load_mesh()
             if not self.custom_mesh_path:
                 return
-        c = Config(scenario="custom" if custom else list(SCENARIOS)[self.scenario.currentIndex()],
+        angles = ()
+        if profile and self.profile_polar.isChecked():
+            if self.polar_min.value() > self.polar_max.value():
+                QtWidgets.QMessageBox.warning(self, "Углы поляры", "Начальный угол должен быть не больше конечного")
+                return
+            angles = tuple(float(a) for a in np.arange(self.polar_min.value(), self.polar_max.value()+1e-6, self.polar_step.value()))
+            if len(angles) > 21:
+                QtWidgets.QMessageBox.warning(self, "Углы поляры", "Максимум 21 угол. Увеличьте шаг.")
+                return
+        c = Config(scenario="custom" if custom else PROFILE_SCENARIO if profile else list(SCENARIOS)[self.scenario.currentIndex()],
                    mesh_path=self.custom_mesh_path if custom else None,
                    mode="steady" if self.mode.currentIndex() == 0 else "transient",
                    max_iterations=self.iterations.value(), tolerance=self.tolerance.value(),
@@ -256,11 +304,16 @@ class Window(QtWidgets.QMainWindow):
                    top=["wall", "open"][self.top.currentIndex()],
                    bottom=["wall", "open"][self.bottom.currentIndex()],
                    speed=self.speed.value(), duration=self.duration.value(),
-                   length=self.length.value(), height=self.height.value())
+                   length=self.length.value(), height=self.height.value(),
+                   rho=1.225 if profile else 998.2, nu=1.5e-5 if profile else 1.004e-6,
+                   intensity=.01 if profile else .05,
+                   profile_angle=self.profile_angle.value(), profile_chord=self.profile_chord.value(),
+                   profile_cells=self.profile_cells.value(), profile_sweep=angles)
         self.playing = False
         self.play.setText("▶ Воспроизвести")
         self.messages = self.context.Queue()
         self.calculation_mode = c.mode
+        self.calculation_scenario = c.scenario
         self.cancel_event = self.context.Event()
         self.process = self.context.Process(target=calculate, args=(c, self.messages, self.cancel_event))
         self.process.start()
@@ -271,18 +324,40 @@ class Window(QtWidgets.QMainWindow):
         self.info.setText("Расчёт RANS / k–ε…\nПервый запуск компилирует численные ядра.\nИнтерфейс остаётся доступен.")
 
     def mode_changed(self, *_):
-        custom = self.scenario.currentIndex() == len(SCENARIOS)
-        if custom and self.mode.currentIndex() != 0:
+        custom = self.scenario.currentIndex() == CUSTOM_INDEX
+        profile = self.scenario.currentIndex() == PROFILE_INDEX
+        if (custom or profile) and self.mode.currentIndex() != 0:
             self.mode.setCurrentIndex(0)
         steady = self.mode.currentIndex() == 0
         enabled = self.process is None
-        self.mode.setEnabled(enabled and not custom)
+        self.mode.setEnabled(enabled and not custom and not profile)
         for control in (self.grid, self.nx, self.ny, self.length, self.height, self.top, self.bottom):
-            control.setEnabled(enabled and not custom)
+            control.setEnabled(enabled and not custom and not profile)
+        for label, control in self.profile_controls:
+            label.setVisible(profile)
+            control.setVisible(profile)
+            control.setEnabled(enabled and profile)
+        for control in (self.polar_min, self.polar_max, self.polar_step):
+            control.setEnabled(enabled and profile and self.profile_polar.isChecked())
+        self.coarse.setEnabled(enabled and steady and not custom and not profile)
+        if profile:
+            if self.last_scenario != PROFILE_INDEX:
+                self.speed.setValue(20.)
+                self.set_mesh(320, 160)
+            for control, value in ((self.length, 8*self.profile_chord.value()),
+                                   (self.height, 4*self.profile_chord.value())):
+                control.setDecimals(4)
+                control.setRange(1e-7, 1e6)
+                control.setValue(value)
+            self.mesh_info.setText("Воздух: ρ=1.225 кг/м³, ν=1.5e−5 м²/с; турбулентность входа 1%.\n"
+                "Верх/низ профиля: 0.10c / 0.06c. Nx/Ny — пиксели. Поляра требует отдельного расчёта каждого угла.")
+        elif not custom:
+            self.mesh_info.setText("")
+        self.last_scenario = self.scenario.currentIndex()
         self.run_button.setText("Рассчитать SIMPLE" if steady else "Рассчитать кадры")
         self.duration_caption.setText("Цикл анимации" if steady else "Время расчёта")
         self.frames.setEnabled(enabled and not steady)
-        for control in (self.iterations, self.tolerance, self.coarse):
+        for control in (self.iterations, self.tolerance):
             control.setEnabled(enabled and steady)
         self.duration.setToolTip("В SIMPLE это длительность воспроизведения, не физического расчёта" if steady else "Длительность физического расчёта")
         self.update_memory()
@@ -317,7 +392,7 @@ class Window(QtWidgets.QMainWindow):
         self.length.setValue(xmax-xmin)
         self.height.setValue(ymax-ymin)
         self.set_mesh(256, max(8, min(256, round(256*(ymax-ymin)/(xmax-xmin)))))
-        self.scenario.setCurrentIndex(len(SCENARIOS))
+        self.scenario.setCurrentIndex(CUSTOM_INDEX)
         self.mesh_info.setText(f"Своя модель: {len(project.cells)} реальных элементов.\n"
             "Границы и размер элементов заданы в утилите. Nx/Ny ниже — только пиксели отображения.")
         self.mode_changed()
@@ -371,7 +446,7 @@ class Window(QtWidgets.QMainWindow):
                     if kind == "progress":
                         i, n, t = value
                         self.progress.setValue(round(i/n*100))
-                        self.info.setText(f"SIMPLE · {'грубая сетка · ' if t < 0 else ''}итерация {i}/{n}" if self.calculation_mode == "steady"
+                        self.info.setText(f"Профиль α={t:+.1f}° · итерация {i}/{n}" if self.calculation_scenario == PROFILE_SCENARIO else f"SIMPLE · {'грубая сетка · ' if t < 0 else ''}итерация {i}/{n}" if self.calculation_mode == "steady"
                                           else f"Кадр {i}/{n} · t = {t:.3f} с")
                     else:
                         self.finish_worker()
@@ -379,7 +454,8 @@ class Window(QtWidgets.QMainWindow):
                             self.accept_result(value)
                         elif kind == "error":
                             self.info.setText("Ошибка расчёта")
-                            QtWidgets.QMessageBox.critical(self, "Ошибка", value)
+                            from .error_report import ErrorDialog
+                            ErrorDialog("Ошибка расчёта — полный отчёт", value, self).exec()
                         else:
                             self.info.setText("Расчёт отменён")
                         break
@@ -407,6 +483,8 @@ class Window(QtWidgets.QMainWindow):
         d = result.diagnostics
         self.native_export.setEnabled(result.native is not None)
         self.residual_button.setEnabled(bool(d.get("residual_history")))
+        self.aero_button.setEnabled(bool(d.get("aerodynamics")))
+        self.aero_toolbar.setEnabled(bool(d.get("aerodynamics")))
         state = (f"SIMPLE: {'сошлось' if d['converged'] else 'НЕ СОШЛОСЬ — достигнут лимит'}\n"
                  f"Итераций: {d['iterations']}; макс. невязка: {max(d['residuals'].values()):.2e}\n"
                  if result.config.mode == "steady" else "")
@@ -421,14 +499,32 @@ class Window(QtWidgets.QMainWindow):
         self.iterations.setValue(c.max_iterations)
         self.tolerance.setValue(c.tolerance)
         self.coarse.setChecked(c.coarse_start)
-        if c.scenario == "custom":
+        if c.scenario in ("custom", PROFILE_SCENARIO):
             for control in (self.length, self.height):
                 control.setDecimals(7)
                 control.setRange(1e-7, 1e6)
             self.custom_mesh_path = c.mesh_path
-            self.scenario.setCurrentIndex(len(SCENARIOS))
+            self.scenario.setCurrentIndex(CUSTOM_INDEX if c.scenario == "custom" else PROFILE_INDEX)
+            if c.scenario == PROFILE_SCENARIO:
+                self.profile_angle.setValue(c.profile_angle)
+                self.profile_chord.setValue(c.profile_chord)
+                self.profile_cells.setValue(c.profile_cells)
+                self.profile_polar.setChecked(bool(c.profile_sweep))
+                if c.profile_sweep:
+                    self.polar_min.setValue(min(c.profile_sweep))
+                    self.polar_max.setValue(max(c.profile_sweep))
+                    unique_angles = sorted(set(c.profile_sweep))
+                    if len(unique_angles) > 1:
+                        self.polar_step.setValue(min(np.diff(unique_angles)))
             self.mesh_info.setText(f"Своя модель: {d.get('mesh_cells', 0)} реальных элементов.\n"
                 "Результат содержит поля на исходной сетке. Nx/Ny — пиксели отображения.")
+            if c.scenario == PROFILE_SCENARIO:
+                aero = d["aerodynamics"]
+                last = aero["final"]
+                ratio = "—" if last["cl_cd"] is None else f"{last['cl_cd']:.3f}"
+                self.mesh_info.setText(f"Профиль · α={c.profile_angle:+.1f}° · {d['mesh_cells']} элементов\n"
+                    f"Cl={last['cl']:.4f} · Cd={last['cd']:.4f} · Cl/Cd={ratio}\n"
+                    f"Поляра: {len(aero.get('polar', []))} углов. ρ={c.rho:g}; силы на единичный размах.")
         else:
             self.scenario.setCurrentIndex(list(SCENARIOS).index(c.scenario))
             self.mesh_info.setText("")
@@ -562,6 +658,16 @@ class Window(QtWidgets.QMainWindow):
             except Exception as exc:
                 QtWidgets.QMessageBox.warning(self, "Ошибка экспорта", str(exc))
 
+    def show_aerodynamics(self):
+        if self.result is None or not self.result.diagnostics.get("aerodynamics"):
+            return
+        from .aero_gui import AeroDialog
+        dialog = AeroDialog(self.result, self)
+        dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.aero_dialogs.append(dialog)
+        dialog.destroyed.connect(lambda *_, dialog=dialog: self.aero_dialogs.remove(dialog) if dialog in self.aero_dialogs else None)
+        dialog.show()
+
     def load(self):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Открыть расчёт", "", "FlowDesk (*.npz)")
         if path:
@@ -573,6 +679,8 @@ class Window(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.critical(self, "Ошибка чтения", str(exc))
 
     def closeEvent(self, event):
+        for dialog in list(self.aero_dialogs):
+            dialog.close()
         for editor in self.mesh_editors:
             editor.close()
         self.timer.stop()

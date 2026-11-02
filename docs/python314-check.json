@@ -1,0 +1,9 @@
+{
+  "python": "3.14.8 (main, Oct  3 2026, 01:04:31) [Clang 22.1.3 ]",
+  "cells": 3476,
+  "iterations": 10,
+  "mass_imbalance": 1.4476267407026455e-14,
+  "tested_platform": "Linux",
+  "scope": "Matrix assembly and 10 iterations on a 3476-cell locally refined profile-like mesh, not a convergence claim",
+  "regression_tests_passed": 11
+}
